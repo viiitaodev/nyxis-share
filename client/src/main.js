@@ -287,8 +287,10 @@ function renderGrid() {
   // no DOM principal e só mudam de lugar por CSS, para não perder eventos.
   $('app').classList.toggle('controles-na-lateral', noPalco);
   $('app').classList.toggle('controles-no-canto', noPalco && telaCheia);
-  $('app').classList.toggle('controles-recolhidos', noPalco && controlesRecolhidos);
-  $('controlsCollapse').hidden = !noPalco;
+  // Em tela cheia os controles já são uma fileira mínima no canto; recolhê-los
+  // só esconderia a saída. A aba existe apenas no palco com lateral.
+  $('app').classList.toggle('controles-recolhidos', noPalco && !telaCheia && controlesRecolhidos);
+  $('controlsCollapse').hidden = !noPalco || telaCheia;
   $('controlsCollapse').setAttribute('aria-expanded', String(!controlesRecolhidos));
   const textoRecolher = controlesRecolhidos ? 'Mostrar controles' : 'Recolher controles';
   $('controlsCollapse').dataset.tip = textoRecolher;
