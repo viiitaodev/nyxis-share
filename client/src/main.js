@@ -238,6 +238,7 @@ function renderGrid() {
   // pelo fechamento do WebSocket mostrava o painel "Ninguém na sala" por cima
   // da lista de salas.
   if (!inRoom()) {
+    $('app').classList.remove('controles-na-lateral');
     grid.hidden = true;
     $('empty').hidden = true;
     $('fullscreen').hidden = true;
@@ -272,6 +273,10 @@ function renderGrid() {
 
   grid.classList.toggle('palco', noPalco);
   grid.classList.toggle('cheia', noPalco && telaCheia);
+  // Os controles continuam filhos diretos da Activity. A aparência na lateral
+  // é resolvida só por CSS; deslocá-los no DOM durante cada render interrompia
+  // o ciclo de montagem do palco e deixava a live em estado inconsistente.
+  $('app').classList.toggle('controles-na-lateral', noPalco && !telaCheia);
 
   // Com a lateral no ar, a contagem no topo repete o que está logo ali — e
   // custa uma faixa inteira de altura, que é o que falta para a tela. Vazia, a

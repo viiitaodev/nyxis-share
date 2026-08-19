@@ -218,6 +218,48 @@ body {
   font-size: 13px;
 }
 
+/* No palco, a barra continua sendo filha direta da Activity — o render da
+   grade reconstrói a lateral, portanto reanexá-la ali quebrava os controles.
+   Em vez disso, ela apenas é posicionada na coluna direita, abaixo das pessoas.
+   O palco deixa de reservar a faixa inferior e recupera a altura inteira. */
+#app.controles-na-lateral > .bottombar {
+  position: absolute;
+  z-index: 2;
+  right: 16px;
+  bottom: 16px;
+  width: var(--strip, 300px);
+  padding: 10px 0 0;
+  align-items: stretch;
+  border-top: 1px solid var(--line);
+}
+
+#app.controles-na-lateral .grid.palco .sidebar {
+  padding-bottom: 190px;
+}
+
+#app.controles-na-lateral > .bottombar .dock {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+#app.controles-na-lateral > .bottombar .group {
+  display: contents;
+}
+
+#app.controles-na-lateral > .bottombar .btn {
+  min-width: 0;
+  justify-content: center;
+}
+
+#app.controles-na-lateral > .bottombar .btn.wide {
+  grid-column: span 2;
+}
+
+#app.controles-na-lateral > .bottombar .panel {
+  width: 100%;
+}
+
 .divider {
   position: relative;
   cursor: col-resize;
@@ -1355,6 +1397,13 @@ button {
   .bottombar {
     padding: 0 8px 8px;
     gap: 6px;
+  }
+
+  #app.controles-na-lateral > .bottombar {
+    position: static;
+    width: auto;
+    padding: 0 8px 8px;
+    border-top: 0;
   }
 
   .dock {
