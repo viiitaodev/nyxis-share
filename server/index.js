@@ -8,30 +8,19 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 
 import { signToken, verifyToken } from './tokens.js';
-import { secretEnv } from './env-file.js';
 import * as R from './rooms.js';
-import * as SESS from './ingest/session.js';
-import {
-  allocSrtPort,
-  releaseSrtPort,
-  ffmpegAvailable,
-  portStats,
-  srtListenerUrl,
-} from './transport/srt.mjs';
-import { startIngestGateway } from './media/gateway.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 const {
   DISCORD_CLIENT_ID,
+  DISCORD_CLIENT_SECRET,
+  DISCORD_BOT_TOKEN,
   PUBLIC_ORIGIN: ORIGEM_CRUA = 'http://localhost:3001',
   PORT = 3001,
   NODE_ENV = 'development',
 } = process.env;
-
-const DISCORD_CLIENT_SECRET = secretEnv('DISCORD_CLIENT_SECRET');
-const DISCORD_BOT_TOKEN = secretEnv('DISCORD_BOT_TOKEN');
 
 // Uma barra sobrando no fim se propaga: o shareUrl vira "//share.html" e o
 // redirect do OAuth vira "//auth/callback", que não bate com o endereço
@@ -43,7 +32,7 @@ const isProd = NODE_ENV === 'production';
 // Falha no arranque, não no primeiro pedido: subir sem segredo significa
 // assinar todos os tokens com o padrão público, e um servidor assim de pé é
 // pior do que um servidor que não sobe.
-if (isProd && !secretEnv('SESSION_SECRET')) {
+if (isProd && !process.env.SESSION_SECRET) {
   console.error('ERRO: SESSION_SECRET obrigatorio em producao — sem ele os tokens sao forjaveis.');
   process.exit(1);
 }
@@ -358,7 +347,6 @@ function issueRoomTokens(roomId, me) {
   return {
     roomId,
     viewerToken: signToken({ ...base, role: 'viewer' }),
-    broadcasterToken: signToken({ ...base, role: 'broadcaster' }),
     shareUrl: `${PUBLIC_ORIGIN}/share.html?t=${encodeURIComponent(
       signToken({ ...base, role: 'broadcaster' })
     )}`,
@@ -523,155 +511,7 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
-app.get('/api/health', async (_req, res) =>
-  res.json({
-    ok: true,
-    rooms: R.stats(),
-    ingest: { ffmpeg: await ffmpegAvailable(), ports: portStats() },
-  })
-);
-
-// ------------------------------------------------------- ingest nativo (SRT)
-
-// Gateways ativos por sessão. O `onSessionEnd` de cada um passa sempre por
-// closeIngestSession — funil único que para o ffmpeg, fecha o WS, remove a
-// sessão e devolve a porta ao pool.
-const gateways = new Map();
-
-function closeIngestSession(sessionId, reason) {
-  const g = gateways.get(sessionId);
-  if (g) {
-    g.stop();
-    gateways.delete(sessionId);
-  }
-  const s = SESS.removeIngestSession(sessionId);
-  if (s) {
-    releaseSrtPort(s.port);
-    console.log(`[ingest] sessão ${sessionId} encerrada (${reason})`);
-  }
-}
-
-SESS.startIngestSweeper((session, reason) => closeIngestSession(session.id, reason));
-
-/**
- * Cria uma sessão de transmissão nativa (SRT).
- *
- * O `roomToken` é o viewerToken da sala — prova de pertencimento que já existe:
- * o servidor verifica assinatura, sala, papel e dono antes de emitir o
- * broadcasterToken que o gateway vai usar. A Activity nunca manda esse token:
- * ele nasce aqui dentro.
- */
-app.post('/api/ingest/session', async (req, res) => {
-  const me = identityOf(req, res);
-  if (!me) return;
-
-  const { roomId, roomToken, profile } = req.body ?? {};
-  if (typeof roomId !== 'string' || typeof roomToken !== 'string') {
-    return res.status(400).json({ error: 'roomId e roomToken obrigatorios' });
-  }
-  if (!SESS.NATIVE_PROFILES.includes(profile)) {
-    return res.status(400).json({ error: 'perfil invalido' });
-  }
-
-  const room = R.getRoom(roomId);
-  if (!room) return res.status(404).json({ error: 'Sala não existe mais.' });
-
-  const t = verifyToken(roomToken);
-  if (!t || t.room !== roomId || t.role !== 'viewer' || t.uid !== me.uid) {
-    return res.status(403).json({ error: 'Você não tem acesso a esta sala.' });
-  }
-
-  if (R.broadcasterOf(room, me.uid)) {
-    return res.status(409).json({ error: 'Você já está transmitindo nesta sala.' });
-  }
-
-  const rl = SESS.ingestRateLimit(me.uid);
-  if (!rl.ok) {
-    return res
-      .status(429)
-      .json({ error: `Muitas sessões criadas. Tente de novo em ${rl.seconds}s.` });
-  }
-
-  if (!(await ffmpegAvailable())) {
-    return res
-      .status(503)
-      .json({ error: 'O gateway de mídia está sem FFmpeg. Contate o administrador.' });
-  }
-
-  const port = allocSrtPort(null);
-  if (port === null) {
-    return res.status(503).json({ error: 'Sem portas SRT disponíveis.' });
-  }
-
-  const { session, senderToken } = SESS.createIngestSession({
-    roomId,
-    userId: me.uid,
-    name: me.name,
-    profile,
-    broadcasterToken: issueRoomTokens(room.id, me).broadcasterToken,
-    port,
-  });
-
-  const gateway = startIngestGateway({
-    session,
-    appPort: Number(PORT),
-    onSessionEnd: (reason) => closeIngestSession(session.id, reason),
-    onLog: (line) => console.log(line),
-  });
-  gateways.set(session.id, gateway);
-
-  console.log(
-    `[ingest] sessão ${session.id} criada por ${me.name} (${profile}, porta ${port}, sala ${roomId})`
-  );
-
-  res.json({
-    sessionId: session.id,
-    expiresAt: session.expiresAt,
-    profile,
-    publish: srtListenerUrl(session),
-    senderToken,
-    server: PUBLIC_ORIGIN,
-  });
-});
-
-/**
- * Troca o senderToken pelo alvo SRT. É o único caminho do Sender até a porta:
- * o token é curto, assinado e a sessão só existe enquanto viva.
- */
-app.post('/api/ingest/session/resolve', (req, res) => {
-  const token = req.body?.token;
-  if (typeof token !== 'string') {
-    return res.status(400).json({ error: 'token obrigatorio' });
-  }
-  const session = SESS.sessionBySenderToken(token);
-  if (!session) {
-    return res.status(401).json({ error: 'Token de publicação inválido ou expirado.' });
-  }
-  SESS.touchIngestSession(session.id);
-  res.json({ sessionId: session.id, profile: session.profile, publish: srtListenerUrl(session) });
-});
-
-/** Encerra uma sessão: quem assina é o Sender (senderToken) ou o dono (identidade). */
-app.post('/api/ingest/session/stop', (req, res) => {
-  const { sessionId, token, identity } = req.body ?? {};
-  if (typeof sessionId !== 'string') {
-    return res.status(400).json({ error: 'sessionId obrigatorio' });
-  }
-  const session = SESS.getIngestSession(sessionId);
-  if (!session) return res.status(404).json({ error: 'Sessão não encontrada.' });
-
-  let ok = false;
-  if (typeof token === 'string') {
-    ok = SESS.sessionBySenderToken(token)?.id === sessionId;
-  } else if (typeof identity === 'string') {
-    const me = verifyToken(identity);
-    ok = me?.scope === 'identity' && me.uid === session.userId;
-  }
-  if (!ok) return res.status(403).json({ error: 'Sem permissão para encerrar esta sessão.' });
-
-  closeIngestSession(sessionId, 'parado');
-  res.json({ ok: true });
-});
+app.get('/api/health', (_req, res) => res.json({ ok: true, rooms: R.stats() }));
 
 /**
  * O que o cliente precisa saber e só o servidor sabe, em tempo de execução.

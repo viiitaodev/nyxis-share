@@ -29,12 +29,6 @@ RUN npm run build
 
 FROM node:22-slim
 
-# O ffmpeg é o motor do caminho nativo: o gateway escuta SRT e demuxa com
-# -c:v copy (sem transcodificar). Sem ele o endpoint de ingest responde 503.
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg \
-  && rm -rf /var/lib/apt/lists/*
-
 # Antes do npm ci: com NODE_ENV=production o npm já pula as devDependencies
 # sozinho, e o servidor lê esta mesma variável para exigir o SESSION_SECRET.
 ENV NODE_ENV=production
