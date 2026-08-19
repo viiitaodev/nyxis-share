@@ -8,12 +8,13 @@
          dos cabeçalhos no-store guardou a versão antiga por heurística do
          navegador, e continuaria usando ela para sempre. Trocar a query força
          uma URL nova. Incremente ao publicar mudanças nesses arquivos. -->
-    <link rel="stylesheet" href="/share.css?v=14" />
+    <link rel="stylesheet" href="/share.css?v=15" />
   </head>
   <body>
     <main class="card">
       <header>
-        <h1>Transmitir</h1>
+        <p class="eyebrow">NYXIS SHARE</p>
+        <h1>Compartilhar na call</h1>
         <p class="sub" id="roomLine">Carregando…</p>
       </header>
 
@@ -26,12 +27,13 @@
            nos dois lugares criavam duas fontes de verdade, e a daqui
            envelhecia assim que alguém mexia na de lá. -->
       <section id="setup">
+        <p class="setup-label">Configuração escolhida na Activity</p>
         <p id="presetLine" class="preset"></p>
       </section>
 
       <div class="fontes">
         <section class="bloco" id="bloco-tela">
-          <h2>Tela</h2>
+          <div class="fonte-head"><h2>Tela</h2><span class="fonte-chip">PRINCIPAL</span></div>
 
           <div id="tela-setup">
             <p class="note" id="tela-nota"></p>
@@ -56,7 +58,7 @@
         </section>
 
         <section class="bloco" id="bloco-camera">
-          <h2>Câmera</h2>
+          <div class="fonte-head"><h2>Câmera</h2><span class="fonte-chip">OPCIONAL</span></div>
 
           <div id="camera-setup">
             <p class="note">
@@ -87,6 +89,6 @@
       </footer>
     </main>
 
-    <script type="module" src="/share.js?v=15"></script>
+    <script type="module" src="/share.js?v=16"></script>
   </body>
 </html>

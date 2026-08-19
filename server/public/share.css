@@ -34,7 +34,16 @@ body {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 28px;
+  padding: 30px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+}
+
+.eyebrow, .setup-label {
+  margin: 0 0 5px;
+  color: #949cff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
 }
 
 h1 {
@@ -159,8 +168,12 @@ video {
 }
 
 .preset {
-  margin: 0 0 4px;
-  color: var(--muted);
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid rgba(88, 101, 242, .32);
+  border-radius: 8px;
+  background: rgba(88, 101, 242, .1);
+  color: #d9dcff;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
@@ -248,9 +261,14 @@ video {
 /* Um bloco por fonte. A régua acima separa sem gastar altura, que é o que
    falta numa página que agora tem dois controles em vez de um. */
 .bloco {
-  padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #1e1f22;
 }
+
+.fonte-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fonte-chip { padding: 3px 7px; border-radius: 999px; background: #30323a; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .05em; }
 
 .bloco h2 {
   margin: 0 0 12px;
@@ -264,7 +282,8 @@ video {
 /* O bloco da fonte pedida pela atividade, enquanto ela espera um clique daqui.
    Sem isto o pedido chega e nada na página muda de aparência. */
 .bloco.chamando {
-  border-top-color: var(--accent, #5865f2);
+  border-color: var(--accent, #5865f2);
+  box-shadow: 0 0 0 2px rgba(88, 101, 242, .18);
 }
 
 .bloco.chamando h2 {
@@ -315,6 +334,6 @@ footer p {
    não há nada para ocupar a largura extra. */
 @media (min-width: 900px) {
   .card {
-    max-width: 980px;
+    max-width: 940px;
   }
 }
