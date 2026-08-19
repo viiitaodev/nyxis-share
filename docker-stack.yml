@@ -1,0 +1,172 @@
+# Nyxis Share — stack Docker Swarm (Portainer)
+#
+# Versão com o modo nativo SRT (Fase 1).
+# Rode o build/push da imagem (com ffmpeg) no GitHub Actions do fork e depois
+# cole este arquivo no Portainer (Stacks → seu stack → Editor → Update).
+#
+# ANTES DE COLAR:
+#  1. Crie o secret `ingest_secret` em Swarm → Secrets (um hex de 64 chars).
+#  2. Substitua DISCORD_CLIENT_ID pelo valor real (ou deixe via variável).
+#  3. Garanta que as portas UDP 4001-4016 estão liberadas no firewall do host.
+#
+# Secrets: crie no Portainer e mantenha os nomes iguais aos da seção `secrets`.
+
+version: "3.8"
+
+networks:
+  nyxis_net:
+    external: true
+
+secrets:
+  session_secret:
+    external: true
+  discord_client_secret:
+    external: true
+  ingest_secret:
+    external: true
+  # discord_bot_token:      # opcional — só se quiser validar presença na call
+  #   external: true
+
+services:
+  share:
+    image: ghcr.io/viiitaodev/nyxis-share:latest
+
+    networks:
+      - nyxis_net
+
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      PUBLIC_ORIGIN: "https://share.nyxis.com.br"
+
+      DISCORD_CLIENT_ID: "1539445820271890432"
+
+      # Segredos por arquivo montado (Docker secrets). O código lê *_FILE.
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      DISCORD_CLIENT_SECRET_FILE: /run/secrets/discord_client_secret
+      INGEST_SECRET_FILE: /run/secrets/ingest_secret
+      # DISCORD_BOT_TOKEN_FILE: /run/secrets/discord_bot_token
+
+      # Modo nativo SRT
+      NYXIS_SRT_HOST: share.nyxis.com.br
+      NYXIS_SRT_PORT_RANGE: "4001-4016"
+
+      # Tunagem opcional (padrões já são bons)
+      # INGEST_SESSION_TTL: 21600
+      # INGEST_SENDER_TTL: 600
+      # INGEST_IDLE_TTL: 600
+      # INGEST_RATE_MAX: 5
+
+    ports:
+      # Ingest SRT (UDP) — 1 porta por sessão, dentro do range acima.
+      # Publique as que quiser do range; para o MVP basta um intervalo útil.
+      - target: 4001
+        published: 4001
+        protocol: udp
+        mode: host
+      - target: 4002
+        published: 4002
+        protocol: udp
+        mode: host
+      - target: 4003
+        published: 4003
+        protocol: udp
+        mode: host
+      - target: 4004
+        published: 4004
+        protocol: udp
+        mode: host
+      - target: 4005
+        published: 4005
+        protocol: udp
+        mode: host
+      - target: 4006
+        published: 4006
+        protocol: udp
+        mode: host
+      - target: 4007
+        published: 4007
+        protocol: udp
+        mode: host
+      - target: 4008
+        published: 4008
+        protocol: udp
+        mode: host
+      - target: 4009
+        published: 4009
+        protocol: udp
+        mode: host
+      - target: 4010
+        published: 4010
+        protocol: udp
+        mode: host
+      - target: 4011
+        published: 4011
+        protocol: udp
+        mode: host
+      - target: 4012
+        published: 4012
+        protocol: udp
+        mode: host
+      - target: 4013
+        published: 4013
+        protocol: udp
+        mode: host
+      - target: 4014
+        published: 4014
+        protocol: udp
+        mode: host
+      - target: 4015
+        published: 4015
+        protocol: udp
+        mode: host
+      - target: 4016
+        published: 4016
+        protocol: udp
+        mode: host
+
+    secrets:
+      - session_secret
+      - discord_client_secret
+      - ingest_secret
+      # - discord_bot_token
+
+    deploy:
+      replicas: 1
+
+      placement:
+        constraints:
+          - node.hostname == nyxis
+
+      restart_policy:
+        condition: any
+        delay: 5s
+
+      update_config:
+        order: stop-first
+        failure_action: rollback
+        delay: 10s
+
+      healthcheck:
+        test:
+          - CMD
+          - node
+          - -e
+          - fetch('http://127.0.0.1:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+        interval: 30s
+        timeout: 5s
+        retries: 3
+        start_period: 15s
+
+      labels:
+        - "traefik.enable=true"
+
+        - "traefik.http.routers.nyxis-share.rule=Host(`share.nyxis.com.br`)"
+        - "traefik.http.routers.nyxis-share.entrypoints=websecure"
+
+        - "traefik.http.routers.nyxis-share.tls=true"
+        - "traefik.http.routers.nyxis-share.tls.certresolver=letsencryptresolver"
+
+        - "traefik.http.services.nyxis-share.loadbalancer.server.port=3001"
+
+        - "traefik.swarm.network=nyxis_net"
