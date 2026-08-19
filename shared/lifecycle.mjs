@@ -8,6 +8,8 @@
 export const PHASES = {
   // Gesto do usuário ainda nem aconteceu / worker ainda não subiu.
   INITIALIZING: 'INITIALIZING',
+  // getDisplayMedia chamado, aguardando o usuário escolher a tela.
+  AWAITING_PICKER: 'AWAITING_PICKER',
   // getDisplayMedia devolveu a tela escolhida.
   CAPTURE_ACQUIRED: 'CAPTURE_ACQUIRED',
   // WebSocket do transmissor conectado ao relay.
@@ -26,6 +28,7 @@ export const PHASES = {
 
 export const PHASE_ORDER = [
   PHASES.INITIALIZING,
+  PHASES.AWAITING_PICKER,
   PHASES.CAPTURE_ACQUIRED,
   PHASES.TRANSPORT_CONNECTED,
   PHASES.ENCODER_READY,
