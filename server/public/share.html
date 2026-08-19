@@ -23,6 +23,7 @@
           <select id="mode">
             <option value="auto" selected>Automático</option>
             <option value="motion">Jogos / Movimento</option>
+            <option value="game">Jogos (captura)</option>
             <option value="text">Texto / Trabalho</option>
           </select>
         </div>
@@ -32,15 +33,25 @@
           <select id="quality">
             <option value="2500000">Boa — 2,5 Mbps</option>
             <option value="5000000">Alta — 5 Mbps</option>
-            <option value="8000000">Máxima — 8 Mbps</option>
+            <option value="8000000" selected>Máxima — 8 Mbps</option>
           </select>
         </div>
 
         <div class="row">
           <label for="fps">Taxa de quadros</label>
           <select id="fps">
-            <option value="30" selected>30 fps</option>
-            <option value="60">60 fps</option>
+            <option value="30">30 fps</option>
+            <option value="60" selected>60 fps</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <label for="outRes">Resolução de saída</label>
+          <select id="outRes">
+            <option value="original" selected>Original (da fonte)</option>
+            <option value="1080">1080p</option>
+            <option value="900">900p</option>
+            <option value="720">720p</option>
           </select>
         </div>
 
@@ -53,7 +64,8 @@
 
         <p class="note">
           Marque também "Compartilhar o áudio" na janela que o navegador abrir — sem isso
-          ele entrega a tela sem som.
+          ele entrega a tela sem som. Em jogos, escolher a <strong>janela</strong> do jogo
+          (em vez da tela inteira) costuma dar melhor FPS de captura.
         </p>
 
         <button id="start" class="primary">Escolher tela e transmitir</button>
@@ -68,6 +80,11 @@
           <div><strong id="bitrate">—</strong><span>enviando</span></div>
           <div><strong id="elapsed">00:00</strong><span>no ar</span></div>
         </div>
+
+        <label class="check preview-toggle">
+          <input id="previewOn" type="checkbox" checked />
+          <span>Preview local</span>
+        </label>
 
         <details id="details" class="details">
           <summary>Detalhes da transmissão</summary>

@@ -8,7 +8,7 @@
  * Toda a lógica de captura e codificação vive em /shared/broadcaster.js, a mesma
  * usada dentro da Activity — aqui é só a interface.
  */
-import { createBroadcaster, supportError } from '/shared/broadcaster.js?v=4';
+import { createBroadcaster, supportError } from '/shared/broadcaster.js?v=5';
 
 const $ = (id) => document.getElementById(id);
 
@@ -108,13 +108,13 @@ function applyPresets() {
 
   if (q) $('quality').value = q;
   if (fps) $('fps').value = fps;
-  if (modo && ['auto', 'motion', 'text'].includes(modo)) $('mode').value = modo;
+  if (modo && ['auto', 'motion', 'game', 'text'].includes(modo)) $('mode').value = modo;
 
   for (const row of document.querySelectorAll('#setup .row')) row.hidden = true;
 
   const mbps = (Number($('quality').value) / 1e6).toFixed(1).replace('.', ',');
   const comSom = $('withAudio').checked ? ' · com som' : '';
-  const modoLabel = { auto: 'Auto', motion: 'Jogos', text: 'Texto' }[$('mode').value];
+  const modoLabel = { auto: 'Auto', motion: 'Jogos', game: 'Jogos', text: 'Texto' }[$('mode').value];
   $('presetLine').textContent = `${modoLabel} · ${mbps} Mb/s · ${$('fps').value} fps${comSom}`;
   $('presetLine').hidden = false;
 }
@@ -128,6 +128,23 @@ function applyPresets() {
 function renderDetails(s) {
   const list = $('detailList');
   if (!list) return;
+  // Fonte de captura legível: monitor / janela / aba.
+  const fonte =
+    s.displaySurface === 'monitor'
+      ? 'Monitor'
+      : s.displaySurface === 'window'
+      ? 'Janela'
+      : s.displaySurface === 'browser'
+      ? 'Aba'
+      : s.displaySurface ?? '—';
+  // HW: "requested" significa que PEDIMOS prefer-hardware, nunca que NVENC foi
+  // usado. Nunca afirmar hardware sem prova.
+  const codecHw =
+    s.codec === 'vp8'
+      ? 'VP8 (software, sem H264 por hardware)'
+      : s.codec === 'vp09.00.10.08'
+      ? 'VP9'
+      : `${s.codec} · ${s.hardwareAcceleration === 'prefer-hardware' ? 'HW requested' : 'HW auto'}`;
   const rows = [
     ['Resolução', s.resolution],
     ['Capture FPS', String(s.captureFps)],
@@ -136,12 +153,17 @@ function renderDetails(s) {
     ['Bitrate real', `${s.actualMbps.toFixed(1)} Mbps`],
     ['Bitrate atual', `${(s.currentBitrate / 1e6).toFixed(1)} Mbps`],
     ['Bitrate alvo', `${(s.targetBitrate / 1e6).toFixed(1)} Mbps`],
-    ['Codec', s.codec],
-    ['HW acceleration', s.hardwareAcceleration],
+    ['Codec', codecHw],
+    ['Fonte', fonte],
+    ['Capture API FPS', s.trackReportedFps != null ? `${s.trackReportedFps}` : '—'],
+    ['Capture (origem)', s.captureWidth && s.captureHeight ? `${s.captureWidth}×${s.captureHeight}` : '—'],
     ['Encoder queue', String(s.encoderQueueSize)],
     ['Dropped (pré-encode)', String(s.droppedBeforeEncode)],
     ['Keyframes', String(s.keyframes)],
     ['Content hint', s.contentHint],
+    ['Pipeline', s.workerPipeline ? 'DedicatedWorker' : 'main thread'],
+    ['Página visível', s.documentVisibility ?? '—'],
+    ['Preview local', s.previewActive ? 'ON' : 'OFF'],
     ['Transport', s.transport],
     ['Gargalo', s.bottleneck ?? '—'],
   ];
@@ -167,13 +189,19 @@ async function start() {
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 
+  // No modo Jogos o preview sai desligado por padrão: ele não deve competir
+  // com a transmissão. O usuário pode religar pelo toggle.
+  const modeSel = $('mode')?.value ?? 'auto';
+  if (modeSel === 'game' || modeSel === 'motion') {
+    $('previewOn').checked = false;
+  }
+
   broadcaster = createBroadcaster({
     wsUrl: `${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`,
     bitrate: Number($('quality').value),
     fps: Number($('fps').value),
     audio: $('withAudio').checked,
-    mode: $('mode')?.value ?? 'auto',
-    onStatus: (s) =>
+    mode: $('mode')?.value ?? 'auto',    onStatus: (s) =>
       setStatus(
         `Codec: ${s.codec} · ${s.width}×${s.height} · captura ${s.direct ? 'direta' : 'via <video>'} · HW ${s.hardwareAcceleration}`
       ),
@@ -193,7 +221,9 @@ async function start() {
     },
     onEnd: (reason) => {
       broadcaster = null;
+      currentStream = null;
       $('preview').srcObject = null;
+      $('preview').style.display = '';
       $('live').hidden = true;
       $('setup').hidden = false;
       $('start').disabled = false;
@@ -203,10 +233,13 @@ async function start() {
 
   try {
     const stream = await broadcaster.start();
+    currentStream = stream;
     $('preview').srcObject = stream;
-    $('preview').play().catch(() => {});
     $('setup').hidden = true;
     $('live').hidden = false;
+    applyPreview();
+    // Sincroniza o estado inicial de visibilidade com a telemetria.
+    syncVisibility();
   } catch (err) {
     broadcaster = null;
     $('start').disabled = false;
@@ -216,6 +249,35 @@ async function start() {
     );
   }
 }
+
+// ------------------------------------------------------- preview fora do caminho
+
+// O preview NUNCA compete com a transmissão. O pipeline (captura/encoder/envio)
+// vive no worker (ou inline, no fallback) e não depende de o preview estar
+// ligado, de a página estar visível, de rAF nem de repaint. Aqui só se decide
+// se o <video> local renderiza.
+let currentStream = null;
+
+function applyPreview() {
+  const on = $('previewOn')?.checked ?? false;
+  const hidden = document.hidden;
+  // Em modo jogo/background o preview desliga por padrão, mas nunca para a
+  // transmissão. NÃO parar o MediaStream nem o encoder.
+  const active = on && !hidden;
+  $('preview').style.display = active ? '' : 'none';
+  broadcaster?.setPreviewActive?.(active);
+}
+
+function syncVisibility() {
+  broadcaster?.setVisibility?.(document.hidden ? 'hidden' : 'visible');
+  applyPreview();
+}
+
+// Mudou a opção do usuário (ON/OFF) — religa o preview quando visível.
+$('previewOn').addEventListener('change', applyPreview);
+// A aba foi para background porque o usuário voltou ao jogo: desliga o preview,
+// mantém a transmissão. Ao voltar, religa se ON.
+document.addEventListener('visibilitychange', syncVisibility);
 
 // Mantém o vídeo como está e troca só de onde vem o som — a única fonte que
 // não carrega o Discord junto é uma aba.

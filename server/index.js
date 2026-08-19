@@ -78,7 +78,12 @@ app.use(
 app.use(
   '/shared',
   express.static(path.join(__dirname, '..', 'shared'), {
-    setHeaders: (res) => res.setHeader('Cache-Control', 'no-store'),
+    setHeaders: (res, filePath) => {
+      res.setHeader('Cache-Control', 'no-store');
+      // O worker é um módulo ES (DedicatedWorker type:module). Chromium exige
+      // o MIME text/javascript — sem isto o worker recusa a carregar.
+      if (filePath.endsWith('.mjs')) res.setHeader('Content-Type', 'text/javascript');
+    },
   })
 );
 
