@@ -646,7 +646,7 @@ function handleBroadcaster(ws, room, info) {
 
     if (msg.type === 'start') {
       R.startStream(room, entry);
-      console.log(`[room ${room.id}] stream iniciada por ${info.name}`);
+      console.log(`[room ${room.id}] stream-start slot=${entry.slot} por ${info.name} (config ja em mãos)`);
     } else if (msg.type === 'config' && msg.config) {
       R.setConfig(room, entry, msg.config);
       console.log(`[room ${room.id}] codec de ${info.name}: ${msg.config.codec}`);

@@ -8,12 +8,12 @@
          dos cabeçalhos no-store guardou a versão antiga por heurística do
          navegador, e continuaria usando ela para sempre. Trocar a query força
          uma URL nova. Incremente ao publicar mudanças nesses arquivos. -->
-    <link rel="stylesheet" href="/share.css?v=11" />
+    <link rel="stylesheet" href="/share.css?v=12" />
   </head>
   <body>
     <main class="card">
       <header>
-        <h1>Compartilhar tela</h1>
+        <h1>Nyxis Share</h1>
         <p class="sub" id="roomLine">Carregando…</p>
       </header>
 
@@ -56,6 +56,10 @@
         </div>
 
         <p id="presetLine" class="preset" hidden></p>
+        <p id="presetHint" class="note" hidden>
+          Você veio da atividade do Discord — a configuração já está pronta.
+          Escolha o que compartilhar e volte para a atividade para assistir.
+        </p>
 
         <label class="check">
           <input id="withAudio" type="checkbox" />
@@ -68,11 +72,12 @@
           (em vez da tela inteira) costuma dar melhor FPS de captura.
         </p>
 
-        <button id="start" class="primary">Escolher tela e transmitir</button>
+        <button id="start" class="primary">Escolher o que compartilhar</button>
       </section>
 
       <section id="live" hidden>
         <div class="live-badge"><span class="dot"></span> No ar</div>
+        <p class="live-hint">Pode voltar para o Discord — a transmissão continua.</p>
         <video id="preview" muted playsinline></video>
         <div class="stats">
           <div><strong id="viewers">0</strong><span>assistindo</span></div>
@@ -81,13 +86,15 @@
           <div><strong id="elapsed">00:00</strong><span>no ar</span></div>
         </div>
 
+        <p id="phaseLine" class="phase" role="status"></p>
+
         <label class="check preview-toggle">
           <input id="previewOn" type="checkbox" checked />
           <span>Preview local</span>
         </label>
 
         <details id="details" class="details">
-          <summary>Detalhes da transmissão</summary>
+          <summary>Diagnóstico avançado</summary>
           <dl id="detailList"></dl>
         </details>
 
@@ -98,10 +105,10 @@
       <p id="status" class="status" role="status"></p>
 
       <footer>
-        <p>Mantenha esta aba aberta enquanto transmite. Você pode voltar para o Discord — a transmissão continua.</p>
+        <p>Mantenha esta aba aberta enquanto transmite. O vídeo aparece na atividade do Discord.</p>
       </footer>
     </main>
 
-    <script type="module" src="/share.js?v=11"></script>
+    <script type="module" src="/share.js?v=12"></script>
   </body>
 </html>
