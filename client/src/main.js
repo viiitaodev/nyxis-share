@@ -850,11 +850,15 @@ function ensureStatsTimer() {
     const s = streams.get(activeSlot) ?? streams.values().next().value;
     if (!s) return;
     $('pLag').textContent = `${Math.max(0, s.player.getLag())} ms`;
-    $('pFps').textContent = `${s.player.takeFrameCount()} fps`;
     $('pRes').textContent = s.player.getSizes().video;
 
     // Telemetria real + feedback do viewer (Fase 1/7).
+    // UMA única amostragem por janela: `takeTelemetry` é quem lê e zera os
+    // contadores de rendered/decoded/received. Não chamar `takeFrameCount`
+    // separadamente no mesmo intervalo — isso zeraria o contador duas vezes e
+    // faria renderedFps reportar 0.
     const t = s.player.takeTelemetry(1);
+    $('pFps').textContent = `${t.renderedFps} fps`;
     renderViewerDetails(s, t);
     sendViewerFeedback(t);
 
@@ -891,7 +895,8 @@ function renderViewerDetails(s, t) {
   if (el) {
     el.textContent =
       `${s.player.getSizes().video} · R ${t.renderedFps}fps · D ${t.decodedFps}fps · ` +
-      `Q ${t.decodeQueueSize} · drop ${t.droppedFrames}`;
+      `receb ${t.receivedFps}fps · Q ${t.decodeQueueSize} · drop ${t.droppedFrames} · ` +
+      `lat ${t.estimatedLatencyMs}ms (est.)`;
   }
 }
 

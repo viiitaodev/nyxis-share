@@ -131,9 +131,11 @@ function renderDetails(s) {
   const rows = [
     ['Resolução', s.resolution],
     ['Capture FPS', String(s.captureFps)],
-    ['Encode FPS', String(s.encodedFps)],
+    ['Submitted FPS', String(s.submittedFps)],
+    ['Encoded FPS', String(s.encodedFps)],
     ['Bitrate real', `${s.actualMbps.toFixed(1)} Mbps`],
-    ['Alvo', `${(s.targetBitrate / 1e6).toFixed(1)} Mbps`],
+    ['Bitrate atual', `${(s.currentBitrate / 1e6).toFixed(1)} Mbps`],
+    ['Bitrate alvo', `${(s.targetBitrate / 1e6).toFixed(1)} Mbps`],
     ['Codec', s.codec],
     ['HW acceleration', s.hardwareAcceleration],
     ['Encoder queue', String(s.encoderQueueSize)],

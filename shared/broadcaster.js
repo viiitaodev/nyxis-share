@@ -9,6 +9,8 @@
  * impõe piso de latência. WebCodecs codifica quadro a quadro e envia direto.
  */
 import { contentHintFor } from './broadcast-mode.mjs';
+import { createAdaptiveController } from './adaptive.mjs';
+import { identifyBottleneck } from './bottleneck.mjs';
 
 // H264 costuma ter encoder por hardware; VP8 quase sempre cai em software, que
 // a 1080p derruba o framerate. Por isso as duas variantes de H264 vêm antes:
@@ -43,6 +45,9 @@ const MAX_H = 1080;
 const DROP_QUEUE_THRESHOLD = 3;
 // Piso do bitrate no adaptive (Fase 6): não vale a pena mandar vídeo inútil.
 const MIN_BITRATE = 500_000;
+
+// Diagnóstico de probing de codec: só em modo debug (nunca spam ao usuário).
+const DEBUG_PROBING = typeof process !== 'undefined' && process.env?.DEBUG_PROBING === '1';
 
 const even = (n) => Math.max(2, n - (n % 2));
 
@@ -123,21 +128,49 @@ export function createBroadcaster({
   let viewers = 0;
   let statsTimer = null;
 
-  // Telemetria real (Fase 1) — nunca maquiar FPS.
+  // Configuração de telemetria (sem contadores — esses vivem em `tel`).
   let t = {
-    capturedFrames: 0,
-    submittedFrames: 0,
-    encodedFrames: 0,
-    droppedBeforeEncode: 0,
-    keyframes: 0,
-    maxEncoderQueue: 0,
     capturePath: null, // 'direct' | 'video'
     transport: 'WebSocket',
     hardwareAcceleration: 'requested',
+    probing: [], // resultado de cada variante testada no pickConfig
+    probingSummary: null,
   };
   let lastTelemetry = null;
   let feedback = null; // resumo do viewer (Fase 7)
-  const ADAPTIVE = { enabled: true, cooldownUntil: 0, lastDownshiftAt: 0 };
+
+  // Contadores acumulados desde o início da janela de telemetria. O FPS é
+  // calculado por delta de tempo real (frames / dt), nunca assumindo 1s.
+  let tel = { captured: 0, submitted: 0, encoded: 0, dropped: 0, keyframes: 0 };
+  let windowStartAt = 0;
+  let lastStatus = null;
+
+  // AdaptiveQualityController (Bug 4): degrada rápido, recupera devagar,
+  // nunca passa do bitrate escolhido pelo usuário/perfil.
+  const adaptive = createAdaptiveController({
+    initialBitrate: bitrate,
+    onApply: applyBitrate,
+    onChange: (msg) => onAviso?.(msg),
+  });
+
+  /**
+   * Estrutura de status SEMPRE consistente (Bug 5). Chamada no start() e em
+   * syncSize() — nunca duplicar estruturas que divergem.
+   */
+  function emitStatus() {
+    const status = {
+      codec: config?.codec,
+      width: config?.width,
+      height: config?.height,
+      direct: t.capturePath === 'direct',
+      mode,
+      hint: hint ?? 'none',
+      hardwareAcceleration: t.hardwareAcceleration ?? 'requested',
+      transport: t.transport,
+    };
+    lastStatus = status;
+    onStatus?.(status);
+  }
 
   async function start() {
     // Precisa vir do gesto do usuário; qualquer await antes disso o invalida.
@@ -184,52 +217,54 @@ export function createBroadcaster({
     t.capturePath = window.MediaStreamTrackProcessor ? 'direct' : 'video';
     t.hardwareAcceleration = config.hardwareAcceleration ?? 'requested';
 
-    onStatus?.({
-      codec: config.codec,
-      width: config.width,
-      height: config.height,
-      direct: t.capturePath === 'direct',
-      mode,
-      hint: hint ?? 'none',
-      hardwareAcceleration: t.hardwareAcceleration,
-    });
+    tel = { captured: 0, submitted: 0, encoded: 0, dropped: 0, keyframes: 0 };
+    windowStartAt = performance.now();
+    emitStatus();
 
     statsTimer = setInterval(() => {
+      const nowPerf = performance.now();
+      const dt = (nowPerf - windowStartAt) / 1000;
       const now = Date.now();
       const actualMbps = (bytes * 8) / 1e6;
-      const dt = (now - (lastTelemetry?.at ?? startedAt)) / 1000;
       const sample = {
         viewers,
-        captureFps: dt > 0 ? Math.round((t.capturedFrames - (lastTelemetry?.capturedFrames ?? 0)) / dt) : 0,
-        submittedFps: dt > 0 ? Math.round((t.submittedFrames - (lastTelemetry?.submittedFrames ?? 0)) / dt) : 0,
-        encodedFps: dt > 0 ? Math.round((t.encodedFrames - (lastTelemetry?.encodedFrames ?? 0)) / dt) : 0,
+        captureFps: dt > 0 ? Math.round(tel.captured / dt) : 0,
+        submittedFps: dt > 0 ? Math.round(tel.submitted / dt) : 0,
+        encodedFps: dt > 0 ? Math.round(tel.encoded / dt) : 0,
         encoderQueueSize: encoder?.encodeQueueSize ?? 0,
-        droppedBeforeEncode: t.droppedBeforeEncode,
+        droppedBeforeEncode: tel.dropped,
         actualMbps: Number(actualMbps.toFixed(2)),
-        targetBitrate: bitrate,
+        targetBitrate: adaptive.initialBitrate,
+        currentBitrate: adaptive.currentBitrate,
+        targetFps: fps,
         codec: config.codec,
         resolution: `${config.width}x${config.height}`,
         contentHint: hint ?? 'none',
         hardwareAcceleration: t.hardwareAcceleration,
         bufferedAmount: ws?.bufferedAmount ?? 0,
         transport: t.transport,
-        keyframes: t.keyframes,
+        keyframes: tel.keyframes,
         mode,
         seconds: Math.floor((now - startedAt) / 1000),
-        // Feedback agregado do viewer (chega via mensagem viewer-health).
         feedback,
-        bottleneck: identifyBottleneck(sample, config),
+        probingSummary: t.probingSummary,
       };
-      lastTelemetry = { ...sample, at: now };
+      // Bug 2: montar o objeto primeiro e só então derivar o gargalo.
+      sample.bottleneck = identifyBottleneck(sample, config?.framerate ?? fps);
+      lastTelemetry = sample;
       onStats?.(sample);
+      adaptive.onTick(sample);
 
-      // Zerar os contadores incrementais para a próxima janela.
-      t.capturedFrames = 0;
-      t.submittedFrames = 0;
-      t.encodedFrames = 0;
-      t.droppedBeforeEncode = 0;
+      // Nova janela: zera contadores e bitrate (contadores de bytes/telemetria).
+      tel.captured = 0;
+      tel.submitted = 0;
+      tel.encoded = 0;
+      tel.dropped = 0;
+      tel.keyframes = 0;
       bytes = 0;
       frames = 0;
+      windowStartAt = nowPerf;
+      adaptive.onTick(sample);
     }, 1000);
 
     pump(track);
@@ -435,14 +470,30 @@ export function createBroadcaster({
       variantes.push({ ...candidate, width, height, bitrate, framerate: fps });
     }
 
+    // Diagnóstico de probing: só em modo debug (nunca spam para o usuário).
+    // Registra por variante para entendermos POR QUE um codec foi escolhido
+    // (ex.: por que VP8 e não H.264).
+    const probeLog = [];
+    t.probing = [];
+
     for (const cfg of variantes) {
+      let supported = false;
       try {
-        const { supported } = await VideoEncoder.isConfigSupported(cfg);
-        if (supported) return cfg;
+        ({ supported } = await VideoEncoder.isConfigSupported(cfg));
       } catch {
-        // candidato inválido neste navegador; tenta o próximo
+        supported = false;
+      }
+      const rotulo = `${cfg.codec} ${cfg.avc?.format ?? 'AVC'}${cfg.hardwareAcceleration ? ' +HW' : ''}${cfg.latencyMode ? ' +realtime' : ''}`;
+      probeLog.push(`${rotulo}: ${supported ? 'supported' : 'unsupported'}`);
+      t.probing.push({ codec: cfg.codec, hw: cfg.hardwareAcceleration, realtime: Boolean(cfg.latencyMode), supported });
+      if (supported) {
+        if (DEBUG_PROBING) console.log('[probe]', probeLog.join(' | '));
+        t.probingSummary = probeLog.join(' | ');
+        return cfg;
       }
     }
+    if (DEBUG_PROBING) console.log('[probe] nenhum codec suportado:', probeLog.join(' | '));
+    t.probingSummary = probeLog.join(' | ');
     return null;
   }
 
@@ -528,18 +579,17 @@ export function createBroadcaster({
       frame.close();
       return false;
     }
-    t.capturedFrames++;
+    tel.captured++;
 
     // Política de fila mensurável (Fase 5), em vez de limite mágico:
     //   0–1: normal
     //   2:   atenção — ainda codifica, mas sinaliza o adaptive controller
     //   >=3: drop seletivo — nunca acumular atraso
     const q = encoder.encodeQueueSize;
-    if (q > t.maxEncoderQueue) t.maxEncoderQueue = q;
     if (q >= DROP_QUEUE_THRESHOLD) {
       frame.close();
-      t.droppedBeforeEncode++;
-      adaptiveSignal('encode-queue', q);
+      tel.dropped++;
+      adaptive.onPressure('encode-queue', q);
       return true;
     }
 
@@ -556,11 +606,12 @@ export function createBroadcaster({
       out = new VideoFrame(stage, { timestamp });
     }
 
-    t.submittedFrames++;
+    // submittedFrames: encoder.encode chamado com sucesso.
+    tel.submitted++;
     try {
       encoder.encode(out, { keyFrame: wantKeyframe });
       if (wantKeyframe) {
-        t.keyframes++;
+        tel.keyframes++;
         lastKeyframeAt = now;
         wantKeyframe = false;
       }
@@ -570,56 +621,23 @@ export function createBroadcaster({
 
     out.close();
     frames++;
-    t.encodedFrames++;
 
-    // Adaptive bitrate (Fase 6): reage a fila/fps do encoder de forma rápida
-    // na descida e lenta na recuperação (com cooldown para não oscilar).
-    if (now > ADAPTIVE.cooldownUntil && q >= 2) {
-      adaptiveSignal('encode-queue', q);
-    }
+    // encodedFrames é incrementado em onEncoded (Bug 3): só quando o encoder
+    // REALMENTE produziu um chunk. Isso diferencia submitted (pedido) de
+    // encoded (produzido) e revela gargalo real de encoder (capture 60,
+    // submitted 60, encoded 43).
+
+    // Sinaliza pressão de fila ao adaptive (não cai no drop seletivo ainda).
+    if (q >= 2) adaptive.onPressure('encode-queue', q);
     return true;
   }
 
-  /**
-   * Fase 6 — reduz o bitrate sob pressão, com recuperação lenta.
-   * `source` identifica a métrica que disparou a mudança.
-   */
-  function adaptiveSignal(source, value) {
-    const now = Date.now();
-    if (now < ADAPTIVE.cooldownUntil) return;
-    if (now - ADAPTIVE.lastDownshiftAt < 4000) return; // hysteresis de descida
-    const novo = Math.max(MIN_BITRATE, Math.round(bitrate * 0.75));
-    if (novo === bitrate) return;
-    bitrate = novo;
-    ADAPTIVE.lastDownshiftAt = now;
-    ADAPTIVE.cooldownUntil = now + 8000; // recuperação lenta
-    if (encoder?.state === 'configured') {
-      config = { ...config, bitrate: novo };
-      encoder.configure(config);
-      wantKeyframe = true;
-    }
-    onAviso?.(
-      `Rede/encoder sob pressão — bitrate reduzido para ${(novo / 1e6).toFixed(1)} Mbps ` +
-        `(${source}). A qualidade volta a subir sozinha quando estabilizar.`
-    );
-  }
-
-  /**
-   * Diagnóstico objetivo do gargalo (Fase: meta). Nunca reduzir em silêncio:
-   * se o FPS real ficar abaixo do alvo, aponta onde está o limite.
-   */
-  function identifyBottleneck(sample, cfg) {
-    const target = cfg?.framerate ?? fps;
-    if (sample.encoderQueueSize >= 3) return 'ENCODER LIMITED';
-    if (sample.encodedFps > 0 && sample.captureFps >= target * 0.9 && sample.encodedFps < target * 0.7) {
-      return 'ENCODER LIMITED';
-    }
-    if (sample.captureFps < target * 0.7) return 'CAPTURE LIMITED';
-    if (sample.bufferedAmount > 2 * 1024 * 1024) return 'NETWORK LIMITED';
-    if (sample.feedback?.worstRenderedFps && sample.feedback.worstRenderedFps < target * 0.7) {
-      return 'VIEWER LIMITED';
-    }
-    return null;
+  /** Aplica um novo bitrate ao encoder e força keyframe. */
+  function applyBitrate(novoBitrate) {
+    if (encoder?.state !== 'configured') return;
+    config = { ...config, bitrate: novoBitrate };
+    encoder.configure(config);
+    wantKeyframe = true;
   }
 
   /**
@@ -641,12 +659,9 @@ export function createBroadcaster({
       config = { ...config, ...target };
       encoder.configure(config);
       wantKeyframe = true;
-      onStatus?.({
-        codec: config.codec,
-        width: config.width,
-        height: config.height,
-        direct: Boolean(window.MediaStreamTrackProcessor),
-      });
+      // Bug 5: mesma estrutura de status em todo reconfigure — nunca omitir
+      // hardwareAcceleration/transport/mode/hint.
+      emitStatus();
     }
 
     // fitWithin preserva a proporção, então reduzir não corta nada.
@@ -663,6 +678,10 @@ export function createBroadcaster({
 
   function onEncoded(chunk, metadata) {
     if (ws?.readyState !== WebSocket.OPEN) return;
+    // Bug 3: encodedFrames é contado aqui — quando o encoder REALMENTE produziu
+    // um chunk — e não logo após encoder.encode(). Isso separa submitted
+    // (pedido) de encoded (produzido) e revela gargalo real de encoder.
+    tel.encoded++;
 
     // O decoderConfig chega no primeiro chunk e sempre que a config muda.
     if (metadata?.decoderConfig) {
@@ -816,11 +835,14 @@ export function createBroadcaster({
 
   /** Ajusta qualidade e taxa de quadros com a transmissão no ar. */
   function setQuality({ bitrate: nextBitrate, fps: nextFps } = {}) {
-    if (nextBitrate) bitrate = nextBitrate;
+    if (nextBitrate) {
+      bitrate = nextBitrate;
+      adaptive.reset(nextBitrate); // novo teto; currentBitrate volta para ele
+    }
     if (nextFps) fps = nextFps;
     if (encoder?.state !== 'configured') return;
 
-    config = { ...config, bitrate, framerate: fps };
+    config = { ...config, bitrate: adaptive.currentBitrate, framerate: fps };
     encoder.configure(config);
     wantKeyframe = true;
 
