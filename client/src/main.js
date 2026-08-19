@@ -282,6 +282,8 @@ function renderGrid() {
   grid.replaceChildren();
 
   if (!noPalco) {
+    // Sem lateral, a barra continua no rodapé normal da Activity.
+    $('app').append($('bottombar'));
     const entradas = entradasDoGrid();
     grid.style.setProperty('--cols', columnsFor(entradas.length));
     grid.append(...entradas.map((e) => buildTile(e.p, { slot: e.slot }).el));
@@ -299,7 +301,11 @@ function renderGrid() {
   // mostrando — e um dos dois fica preto, conforme a ordem do desenho.
   grid.append(buildTile(emCena, { palco: true, slot: activeSlot }).el);
 
-  if (telaCheia) return;
+  if (telaCheia) {
+    // Tela cheia não tem lateral; não esconda a saída e os controles.
+    $('app').append($('bottombar'));
+    return;
+  }
 
   applyStrip();
   grid.append(divider, buildSidebar());
@@ -320,7 +326,16 @@ function buildSidebar() {
   // miniaturas aqui, e a que está no palco é a única que não se repete.
   const outras = entradasDoGrid().filter((e) => e.slot !== null && e.slot !== activeSlot);
   if (outras.length) {
-    barra.append(secaoTitulo(outras.length === 1 ? 'Outra transmissão' : 'Outras transmissões'));
+    const fontes = new Set(outras.map((e) => available.get(e.slot)?.fonte ?? 'tela'));
+    const titulo =
+      fontes.size === 1 && fontes.has('camera')
+        ? outras.length === 1
+          ? 'Câmera'
+          : 'Câmeras'
+        : outras.length === 1
+        ? 'Outra transmissão'
+        : 'Outras transmissões';
+    barra.append(secaoTitulo(titulo));
     for (const e of outras) barra.append(buildTile(e.p, { slot: e.slot }).el);
   }
 
@@ -331,8 +346,18 @@ function buildSidebar() {
   // enquanto a miniatura ao lado mostrava a tela.
   const gente = document.createElement('div');
   gente.className = 'sidebar-people';
-  for (const p of participants) gente.append(buildTile(p, { semVideo: true }).el);
+  // Um participante que já tem uma fonte visível não precisa aparecer de novo
+  // como avatar logo abaixo. A contagem segue incluindo todo mundo; aqui fica
+  // só quem está acompanhando, sem duplicar a identidade de quem transmite.
+  for (const p of participants.filter((p) => !p.broadcasting)) {
+    gente.append(buildTile(p, { semVideo: true }).el);
+  }
   barra.append(gente);
+
+  // No palco a lateral já concentra o contexto da call. Colocar os controles
+  // abaixo das pessoas libera toda a altura que a barra inferior consumia e
+  // deixa a composição próxima da call nativa do Discord.
+  barra.append($('bottombar'));
 
   return barra;
 }
