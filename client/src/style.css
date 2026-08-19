@@ -218,37 +218,45 @@ body {
   font-size: 13px;
 }
 
-/* No palco, os controles moram no fim da lateral como na call nativa. A barra
-   deixa de reservar altura sob o vídeo e o palco ganha essa área inteira. */
-.sidebar > .bottombar {
-  flex: 0 0 auto;
-  width: 100%;
-  margin-top: auto;
+/* A barra não é reanexada à lateral a cada render: isso interrompia os
+   handlers de assistir e podia deixar os botões fora da tela. Ela continua
+   filha da Activity e só é posicionada visualmente na coluna direita. */
+#app.controles-na-lateral > .bottombar {
+  display: flex;
+  position: absolute;
+  z-index: 2;
+  right: 16px;
+  bottom: 16px;
+  width: var(--strip, 300px);
   padding: 10px 0 0;
   align-items: stretch;
   border-top: 1px solid var(--line);
 }
 
-.sidebar > .bottombar .dock {
+#app.controles-na-lateral .grid.palco .sidebar {
+  padding-bottom: 190px;
+}
+
+#app.controles-na-lateral > .bottombar .dock {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
-.sidebar > .bottombar .group {
+#app.controles-na-lateral > .bottombar .group {
   display: contents;
 }
 
-.sidebar > .bottombar .btn {
+#app.controles-na-lateral > .bottombar .btn {
   min-width: 0;
   justify-content: center;
 }
 
-.sidebar > .bottombar .btn.wide {
+#app.controles-na-lateral > .bottombar .btn.wide {
   grid-column: span 2;
 }
 
-.sidebar > .bottombar .panel {
+#app.controles-na-lateral > .bottombar .panel {
   width: 100%;
 }
 
@@ -1389,6 +1397,13 @@ button {
   .bottombar {
     padding: 0 8px 8px;
     gap: 6px;
+  }
+
+  #app.controles-na-lateral > .bottombar {
+    position: static;
+    width: auto;
+    padding: 0 8px 8px;
+    border-top: 0;
   }
 
   .dock {

@@ -238,6 +238,7 @@ function renderGrid() {
   // pelo fechamento do WebSocket mostrava o painel "Ninguém na sala" por cima
   // da lista de salas.
   if (!inRoom()) {
+    $('app').classList.remove('controles-na-lateral');
     grid.hidden = true;
     $('empty').hidden = true;
     $('fullscreen').hidden = true;
@@ -272,6 +273,9 @@ function renderGrid() {
 
   grid.classList.toggle('palco', noPalco);
   grid.classList.toggle('cheia', noPalco && telaCheia);
+  // A lateral é reconstruída a cada atualização da sala. Os controles ficam
+  // no DOM principal e só mudam de lugar por CSS, para não perder eventos.
+  $('app').classList.toggle('controles-na-lateral', noPalco && !telaCheia);
 
   // Com a lateral no ar, a contagem no topo repete o que está logo ali — e
   // custa uma faixa inteira de altura, que é o que falta para a tela. Vazia, a
@@ -282,8 +286,6 @@ function renderGrid() {
   grid.replaceChildren();
 
   if (!noPalco) {
-    // Sem lateral, a barra continua no rodapé normal da Activity.
-    $('app').append($('bottombar'));
     const entradas = entradasDoGrid();
     grid.style.setProperty('--cols', columnsFor(entradas.length));
     grid.append(...entradas.map((e) => buildTile(e.p, { slot: e.slot }).el));
@@ -301,11 +303,7 @@ function renderGrid() {
   // mostrando — e um dos dois fica preto, conforme a ordem do desenho.
   grid.append(buildTile(emCena, { palco: true, slot: activeSlot }).el);
 
-  if (telaCheia) {
-    // Tela cheia não tem lateral; não esconda a saída e os controles.
-    $('app').append($('bottombar'));
-    return;
-  }
+  if (telaCheia) return;
 
   applyStrip();
   grid.append(divider, buildSidebar());
@@ -353,11 +351,6 @@ function buildSidebar() {
     gente.append(buildTile(p, { semVideo: true }).el);
   }
   barra.append(gente);
-
-  // No palco a lateral já concentra o contexto da call. Colocar os controles
-  // abaixo das pessoas libera toda a altura que a barra inferior consumia e
-  // deixa a composição próxima da call nativa do Discord.
-  barra.append($('bottombar'));
 
   return barra;
 }
