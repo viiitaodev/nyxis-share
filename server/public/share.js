@@ -34,6 +34,7 @@ const TITULO = document.title;
 const opcoes = {
   bitrate: Number(query.get('q')) || 2_500_000,
   fps: Number(query.get('fps')) || 30,
+  codec: ['auto', 'h264', 'vp8', 'vp9'].includes(query.get('codec')) ? query.get('codec') : 'auto',
   som: query.get('som') === '1',
 };
 
@@ -41,6 +42,7 @@ function aplicarOpcoes(novas) {
   if (!novas) return;
   if (Number(novas.q)) opcoes.bitrate = Number(novas.q);
   if (Number(novas.fps)) opcoes.fps = Number(novas.fps);
+  if (['auto', 'h264', 'vp8', 'vp9'].includes(novas.codec)) opcoes.codec = novas.codec;
   if (novas.som !== undefined) opcoes.som = novas.som === '1';
   mostrarOpcoes();
 }
@@ -48,7 +50,7 @@ function aplicarOpcoes(novas) {
 function mostrarOpcoes() {
   const mbps = (opcoes.bitrate / 1e6).toFixed(1).replace('.', ',');
   $('presetLine').textContent =
-    `${mbps} Mb/s · ${opcoes.fps} fps${opcoes.som ? ' · com som' : ' · sem som'}`;
+    `${mbps} Mb/s · ${opcoes.fps} fps · ${opcoes.codec.toUpperCase()}${opcoes.som ? ' · com som' : ' · sem som'}`;
 
   // A nota da tela acompanha: com som ela explica a caixa que o navegador
   // mostra; sem som, diz onde ligar, que já não é aqui.
@@ -258,6 +260,7 @@ function criarPainel(fonte) {
       wsUrl: `${proto}://${location.host}/ws?t=${encodeURIComponent(token)}&fonte=${fonte}`,
       bitrate: opcoes.bitrate,
       fps: opcoes.fps,
+      codec: opcoes.codec,
       audio: !camera && opcoes.som,
       fonte,
       onStatus: (s) =>
