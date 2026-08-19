@@ -127,13 +127,14 @@ function applyPresets() {
 
 const ROTULO_FASE = {
   INITIALIZING: 'Iniciando…',
-  CAPTURE_ACQUIRED: 'Captura escolhida',
-  TRANSPORT_CONNECTED: 'Conectando ao servidor…',
-  ENCODER_READY: 'Codificador pronto',
-  CAPTURE_PUMPING: 'Lendo a tela…',
-  FIRST_FRAME_SUBMITTED: 'Primeiro quadro enviado ao codificador',
-  FIRST_FRAME_ENCODED: 'Primeiro quadro codificado',
-  STREAM_READY: 'No ar',
+  AWAITING_PICKER: 'Aguardando seleção de tela…',
+  CAPTURE_ACQUIRED: 'Tela escolhida.',
+  TRANSPORT_CONNECTED: 'Conectado ao servidor.',
+  ENCODER_READY: 'Codificador pronto.',
+  CAPTURE_PUMPING: 'Capturando quadros…',
+  FIRST_FRAME_SUBMITTED: 'Primeiro quadro enviado ao codificador.',
+  FIRST_FRAME_ENCODED: 'Primeiro quadro codificado.',
+  STREAM_READY: 'No ar.',
 };
 
 function faseLegivel(phase) {
@@ -220,13 +221,33 @@ async function start() {
 
   console.debug('[share] start', { bitrate: Number($('quality').value), fps: Number($('fps').value), mode: modeSel });
 
+  let phaseAt = performance.now();
+  let watchdogTimer = null;
+
   broadcaster = createBroadcaster({
     wsUrl: `${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`,
     bitrate: Number($('quality').value),
     fps: Number($('fps').value),
     audio: $('withAudio').checked,
     mode: $('mode')?.value ?? 'auto',
-    onPhase: (p) => console.debug('[share] phase', p),
+    onPhase: (p) => {
+      const elapsed = performance.now() - phaseAt;
+      console.log(`[share] phase=${p} t=${Math.round(elapsed)}ms`);
+      setStatus(faseLegivel(p));
+      $('phaseLine').textContent = faseLegivel(p);
+      phaseAt = performance.now();
+      // Watchdog: após CAPTURE_ACQUIRED, se TRANSPORT_CONNECTED não chegar em 10s,
+      // ou se FIRST_FRAME_ENCODED não chegar em 15s, avisa.
+      clearTimeout(watchdogTimer);
+      if (p === 'CAPTURE_ACQUIRED') {
+        watchdogTimer = setTimeout(() => {
+          setStatus('A tela foi escolhida, mas o servidor não respondeu a tempo.', 'error');
+          $('start').disabled = false;
+        }, 10_000);
+      } else if (p === 'STREAM_READY') {
+        clearTimeout(watchdogTimer);
+      }
+    },
     onStatus: (s) => {
       setStatus(
         `Codec: ${s.codec} · ${s.width}×${s.height} · captura ${s.direct ? 'direta' : 'via <video>'} · HW ${s.hardwareAcceleration}`

@@ -129,6 +129,7 @@ export function createInlineBroadcaster({
   let serverStarted = false;
   let firstFrameSubmitted = false;
   let readyResolve = null;
+  let currentPhase = null;
 
   // contentHint efetivo, decidido pelo modo quando não foi forçado.
   const hint = contentHint || contentHintFor(mode);
@@ -180,6 +181,12 @@ export function createInlineBroadcaster({
     onChange: (msg) => onAviso?.(msg),
   });
 
+  /** Emite fase e guarda para getPhase(). */
+  function emitPhase(phase) {
+    currentPhase = phase;
+    onPhase?.(phase);
+  }
+
   /**
    * Estrutura de status SEMPRE consistente (Bug 5). Chamada no start() e em
    * syncSize() — nunca duplicar estruturas que divergem.
@@ -206,10 +213,12 @@ export function createInlineBroadcaster({
   }
 
   async function start() {
+    emitPhase(PHASES.INITIALIZING);
     // Precisa vir do gesto do usuário; qualquer await antes disso o invalida.
     // Quando a fachada já adquiriu o stream (fallback do worker), reutiliza-o
     // sem abrir o seletor de novo.
     if (!stream) {
+      emitPhase(PHASES.AWAITING_PICKER);
       stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: fps, max: fps } },
       // systemAudio: 'include' pede o som do computador em vez de só o da aba.
@@ -218,6 +227,7 @@ export function createInlineBroadcaster({
       audio: audio ? audioConstraints() : false,
     });
     }
+    emitPhase(PHASES.CAPTURE_ACQUIRED);
 
     const track = stream.getVideoTracks()[0];
     // Diz ao encoder o tipo de conteúdo: 'text' preserva nitidez de UI,
@@ -248,14 +258,14 @@ export function createInlineBroadcaster({
     }
 
     await connect();
-    onPhase?.(PHASES.TRANSPORT_CONNECTED);
+    emitPhase(PHASES.TRANSPORT_CONNECTED);
 
     encoder = new VideoEncoder({
       output: onEncoded,
       error: (err) => stop(`Erro no encoder: ${err.message}`),
     });
     encoder.configure(config);
-    onPhase?.(PHASES.ENCODER_READY);
+    emitPhase(PHASES.ENCODER_READY);
 
     running = true;
     wantKeyframe = true;
@@ -599,7 +609,7 @@ export function createInlineBroadcaster({
   /** Chromium: acesso direto aos quadros, sem cópia intermediária. */
   async function pumpDirect(track) {
     reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-    onPhase?.(PHASES.CAPTURE_PUMPING);
+    emitPhase(PHASES.CAPTURE_PUMPING);
     while (running) {
       let frame;
       try {
@@ -619,7 +629,7 @@ export function createInlineBroadcaster({
     video.muted = true;
     video.playsInline = true;
     video.srcObject = stream;
-    onPhase?.(PHASES.CAPTURE_PUMPING);
+    emitPhase(PHASES.CAPTURE_PUMPING);
     // Fora do fluxo mas no DOM: alguns navegadores não decodificam um elemento
     // solto, e display:none chega a pausar a reprodução.
     Object.assign(video.style, {
@@ -703,7 +713,7 @@ export function createInlineBroadcaster({
     // submittedFrames: encoder.encode chamado com sucesso.
     if (!firstFrameSubmitted) {
       firstFrameSubmitted = true;
-      onPhase?.(PHASES.FIRST_FRAME_SUBMITTED);
+      emitPhase(PHASES.FIRST_FRAME_SUBMITTED);
     }
     tel.submitted++;
     try {
@@ -807,8 +817,8 @@ export function createInlineBroadcaster({
       if (!serverStarted) {
         serverStarted = true;
         ws.send(JSON.stringify({ type: 'start' }));
-        onPhase?.(PHASES.FIRST_FRAME_ENCODED);
-        onPhase?.(PHASES.STREAM_READY);
+        emitPhase(PHASES.FIRST_FRAME_ENCODED);
+        emitPhase(PHASES.STREAM_READY);
         readyResolve?.();
         readyResolve = null;
       }
@@ -1035,6 +1045,7 @@ export function createInlineBroadcaster({
     somBloqueado: () => somBloqueado,
     isRunning: () => running,
     getMode: () => mode,
+    getPhase: () => currentPhase,
     // Contexto de UI: preview ativo e visibilidade do documento. Não afetam o
     // pipeline (a transmissão nunca depende deles), só a telemetria.
     setPreviewActive: (v) => (t.previewActive = v),

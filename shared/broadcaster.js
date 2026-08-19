@@ -1,53 +1,19 @@
 /**
  * Pipeline de transmissão: captura → codifica → envia.
  *
- * Módulo compartilhado entre a Activity (captura dentro do modal, quando o
- * Discord permite) e a página de captura externa (quando não permite). Uma
- * fachada única — o pipeline real roda num DedicatedWorker quando o navegador
- * permite transferir o MediaStreamTrack, e cai para a implementação inline
- * (main thread) caso contrário.
+ * Fachada que decide entre inline (default, main thread) e worker (experimental,
+ * opt-in). O pipeline inline é o baseline de produção — já funcionava antes da
+ * introdução do worker.
  *
- * Por que worker: quando o usuário coloca um jogo em primeiro plano e a aba de
- * captura vai para background, o pipeline pesado (MediaStreamTrackProcessor,
- * VideoEncoder, packaging, WebSocket, telemetria) não deve depender de
- * requestAnimationFrame, de timers visuais, de repaint da página nem de
- * preview. Isso isola a main thread para UI/permissões/start-stop/preview.
+ * Worker só é ativado quando explicitamente habilitado via:
+ *   - URL:   ?experimentalWorker=1
+ *   - localStorage: nyxisExperimentalWorker = "1"
  *
- * A captura SEMPRE nasce aqui (getDisplayMedia exige gesto + permissão na main
- * thread).
- *
- * SEGURANÇA DA CAPTURA (fix pós-DedicatedWorker):
- * 1. Antes de qualquer coisa destrutiva, um probe com track descartável de
- *    canvas testa se o navegador aceita transferir MediaStreamTrack. O track
- *    escolhido pelo usuário NUNCA entra nesse teste.
- * 2. Mesmo com o probe ok, o worker recebe um CLONE do track de vídeo. O
- *    original fica na main thread (preview, telemetria, e o fallback inline
- *    intacto). Se a transferência do clone falhar, o clone é parado e o
- *    original segue usado no pipeline inline — a captura nunca é destruída.
- * 3. O áudio só é preparado/transferido DEPOIS que a estratégia de pipeline
- *    está confirmada — falhar no worker não perde o som escolhido.
- *
- * Handshake: main → init; worker → initialized; main → track (clone); worker →
- * capture-pumping → first-frame → stream-ready. `start()` resolve apenas em
- * STREAM_READY (a pipeline tem condições de produzir mídia). O worker também
- * aceita o track antes do init terminar (bufferiza e arranca depois) — nunca
- * há corrida entre mensagens.
- *
- * Sem WebRTC porque a Activity não tem, e sem MediaRecorder porque o container
- * impõe piso de latência. WebCodecs codifica quadro a quadro e envia direto.
+ * Regra: funcionamento vem antes de otimização. O worker é uma otimização
+ * experimental que só entra em produção quando comprovadamente estável.
  */
 import { createInlineBroadcaster } from './broadcaster-inline.js';
 import { contentHintFor } from './broadcast-mode.mjs';
-import { PHASES } from './lifecycle.mjs';
-
-const STREAM_READY_TIMEOUT_MS = 15_000;
-const INIT_TIMEOUT_MS = 25_000;
-
-function workerSupported() {
-  if (typeof Worker === 'undefined') return false;
-  if (typeof MediaStreamTrackProcessor === 'undefined') return false;
-  return true;
-}
 
 export function supportError({ requireChromium = false } = {}) {
   if (!navigator.mediaDevices?.getDisplayMedia) {
@@ -62,53 +28,23 @@ export function supportError({ requireChromium = false } = {}) {
   return null;
 }
 
-function defaultCreateWorker() {
-  return new Worker(new URL('./broadcast-worker.mjs', import.meta.url), { type: 'module' });
+/**
+ * Worker experimental só é usado quando explicitamente habilitado.
+ * Browser suportar Worker/MediaStreamTrackProcessor NÃO significa que
+ * transferir um display MediaStreamTrack seja confiável.
+ */
+function experimentalWorkerEnabled() {
+  try {
+    if (new URLSearchParams(location.search).get('experimentalWorker') === '1') return true;
+    if (localStorage.getItem('nyxisExperimentalWorker') === '1') return true;
+  } catch {}
+  return false;
 }
 
-/**
- * Testa se o navegador aceita transferir MediaStreamTrack para um worker.
- *
- * Usa um track descartável de canvas.captureStream() — NUNCA a captura
- * escolhida pelo usuário. Se o postMessage lançar (track não transferível), se
- * o worker receber o track morto, ou se nada responder em 3s, o resultado é
- * false e a fachada segue direto para o inline com o stream intacto.
- */
-async function canTransferTrack() {
-  if (!workerSupported()) return false;
-  try {
-    const canvas = document.createElement('canvas');
-    const stream = canvas.captureStream();
-    const track = stream.getVideoTracks()[0];
-    if (!track) return false;
-
-    const w = defaultCreateWorker();
-    return await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        w.terminate();
-        track.stop();
-        resolve(false);
-      }, 3000);
-      const done = (ok) => {
-        clearTimeout(timer);
-        w.terminate();
-        track.stop();
-        resolve(ok);
-      };
-      w.onmessage = (e) => {
-        if (e?.data?.type === 'probe-ok') done(true);
-        else if (e?.data?.type === 'probe-fail') done(false);
-      };
-      w.onerror = () => done(false);
-      try {
-        w.postMessage({ type: 'probe', track }, [track]);
-      } catch {
-        done(false);
-      }
-    });
-  } catch {
-    return false;
-  }
+function workerSupported() {
+  if (typeof Worker === 'undefined') return false;
+  if (typeof MediaStreamTrackProcessor === 'undefined') return false;
+  return true;
 }
 
 /**
@@ -117,38 +53,38 @@ async function canTransferTrack() {
  * @param {number} opts.bitrate
  * @param {number} opts.fps
  * @param {boolean} [opts.audio]
- * @param {string} [opts.mode]        'auto' | 'motion' | 'game' | 'text'
+ * @param {string} [opts.mode]
  * @param {string} [opts.contentHint]
  * @param {(info:object)=>void} [opts.onStatus]
  * @param {(stats:object)=>void} [opts.onStats]
+ * @param {(phase:string)=>void} [opts.onPhase]  fase do lifecycle
  * @param {(reason:string)=>void} [opts.onEnd]
  * @param {(msg:string)=>void} [opts.onAviso]
  * @param {(msg:string)=>void} [opts.onError]
- * @param {(phase:string)=>void} [opts.onPhase]
- * @param {object} [opts.__internals]   hooks de teste (não usar em produção)
  */
 export function createBroadcaster(opts) {
-  const internals = opts.__internals ?? {};
+  // Default: inline. Worker só com flag.
+  if (experimentalWorkerEnabled() && workerSupported()) {
+    try {
+      console.log('[broadcaster] worker experimental habilitado — usando worker pipeline');
+      return createWorkerBroadcaster(opts);
+    } catch (err) {
+      console.warn('[broadcaster] worker falhou, caindo para inline:', err?.message ?? err);
+    }
+  }
+  return createInlineBroadcaster(opts);
+}
 
-  // `backend` é a implementação ativa. Começa como null e é definido no start():
-  // worker-handle quando a transferência do track funciona, inline-handle caso
-  // contrário (ou quando o navegador não suporta worker). Toda a API delega aqui.
-  let backend = null;
+// ----------------------------------------------------------------- worker (experimental)
+
+function createWorkerBroadcaster(opts) {
   let worker = null;
   let stream = null;
   let running = false;
-  let stopped = false;
   let somBloqueado = false;
   let previewActive = false;
   let visibility = null;
   let hasAudio = false;
-  let phase = null;
-
-  function setPhase(p) {
-    if (phase === p) return;
-    phase = p;
-    opts.onPhase?.(p);
-  }
 
   function audioConstraints() {
     const c = {
@@ -177,377 +113,137 @@ export function createBroadcaster(opts) {
     return null;
   }
 
-  function post(msg) {
-    worker.postMessage(msg);
-  }
+  function post(msg) { worker.postMessage(msg); }
+  function postTrack(track, key) { worker.postMessage({ type: key, track }, [track]); }
 
-  function postTrack(track, key) {
-    worker.postMessage({ type: key, track }, [track]);
-  }
-
-  // ------------------------------------------------------------- worker-handle
-
-  function makeWorkerHandle() {
+  function makeHandle() {
     const hint = opts.contentHint || contentHintFor(opts.mode ?? 'auto');
-    worker = (internals.createWorker ?? defaultCreateWorker)();
-
-    // Espera por um tipo de mensagem do worker. Sequencial: só há um await por
-    // vez em start() ('initialized' e depois 'stream-ready').
-    const waiters = new Map();
-
-    function waitFor(type, timeoutMs) {
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-          waiters.delete(type);
-          reject(new Error(`Pipeline parou antes de ficar pronto (aguardando ${type}).`));
-        }, timeoutMs);
-        waiters.set(type, { resolve, reject, timer });
-      });
-    }
-
-    function settle(type, value) {
-      const w = waiters.get(type);
-      if (!w) return;
-      clearTimeout(w.timer);
-      waiters.delete(type);
-      w.resolve(value);
-    }
-
-    function settleRejectAll(reason) {
-      const err = new Error(reason ?? 'Transmissão encerrada.');
-      for (const [, w] of waiters) {
-        clearTimeout(w.timer);
-        w.reject(err);
-      }
-      waiters.clear();
-    }
+    worker = new Worker(new URL('./broadcast-worker.mjs', import.meta.url), { type: 'module' });
+    let startedPromise = null;
 
     worker.onmessage = (e) => {
       const msg = e.data;
       if (!msg) return;
       switch (msg.type) {
-        case 'initialized':
-          setPhase(PHASES.TRANSPORT_CONNECTED);
-          setPhase(PHASES.ENCODER_READY);
-          settle('initialized');
-          break;
-        case 'capture-pumping':
-          setPhase(PHASES.CAPTURE_PUMPING);
-          break;
-        case 'first-frame':
-          setPhase(PHASES.FIRST_FRAME_SUBMITTED);
-          break;
-        case 'stream-ready':
-          setPhase(PHASES.FIRST_FRAME_ENCODED);
-          setPhase(PHASES.STREAM_READY);
-          settle('stream-ready');
-          break;
         case 'status':
           if (typeof msg.status?.hasAudio === 'boolean') hasAudio = msg.status.hasAudio;
-          opts.onStatus?.({ ...msg.status, phase });
+          opts.onStatus?.(msg.status);
           break;
         case 'stats':
-          opts.onStats?.({ ...msg.stats, phase });
+          opts.onStats?.(msg.stats);
           break;
         case 'aviso':
           opts.onAviso?.(msg.msg);
           break;
+        case 'ready':
+          startedPromise?.resolve?.();
+          startedPromise = null;
+          break;
+        case 'end':
+          if (startedPromise) { startedPromise.reject?.(new Error(msg.reason)); startedPromise = null; }
+          if (running) { running = false; opts.onEnd?.(msg.reason); }
+          break;
         case 'error':
           opts.onError?.(msg.message);
           break;
-        case 'end':
-          settleRejectAll(msg.reason);
-          if (running) {
-            running = false;
-            opts.onEnd?.(msg.reason);
-          }
-          break;
       }
     };
-
     worker.onerror = (err) => {
-      console.warn('[broadcaster worker] erro:', err?.message ?? err);
-      settleRejectAll('O pipeline de captura no worker falhou.');
-      if (running) {
-        running = false;
-        opts.onEnd?.('O pipeline de captura no worker falhou.');
-      }
+      if (running) { running = false; opts.onEnd?.('Worker falhou.'); }
     };
 
     return {
       start: async () => {
-        const originalTrack = stream.getVideoTracks()[0];
-        if (hint) originalTrack.contentHint = hint;
-        originalTrack.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
-
-        post({
-          type: 'init',
-          wsUrl: opts.wsUrl,
-          bitrate: opts.bitrate,
-          fps: opts.fps,
-          audio: opts.audio,
-          mode: opts.mode ?? 'auto',
-          contentHint: hint,
-          debugProbing: false,
-        });
-
-        // Handshake: só transfere o track depois que o worker confirmou que
-        // config/socket/encoder estão prontos.
-        try {
-          await waitFor('initialized', internals.initTimeoutMs ?? INIT_TIMEOUT_MS);
-        } catch (err) {
-          if (stopped) throw new Error('Transmissão cancelada.');
-          console.warn('[broadcaster] worker não inicializou, caindo para inline:', err.message);
-          return { fallbackInline: true };
-        }
-
-        // Clone para o worker; o ORIGINAL permanece intacto na main thread
-        // (preview, telemetria, fallback inline). Nunca transferimos o track real.
-        const workerTrack = originalTrack.clone();
+        const track = stream.getVideoTracks()[0];
+        if (hint) track.contentHint = hint;
+        track.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
+        post({ type: 'init', wsUrl: opts.wsUrl, bitrate: opts.bitrate, fps: opts.fps, audio: opts.audio, mode: opts.mode ?? 'auto', contentHint: hint });
+        startedPromise = {};
+        const started = new Promise((resolve, reject) => { startedPromise.resolve = resolve; startedPromise.reject = reject; });
+        const audioTrack = prepararSom(track, stream);
         let videoOk = true;
-        try {
-          postTrack(workerTrack, 'track');
-        } catch (err) {
-          videoOk = false;
-          console.warn('[broadcaster] clone de vídeo não transferível, caindo para inline:', err?.message ?? err);
-          workerTrack.stop();
-        }
+        try { postTrack(track, 'track'); } catch { videoOk = false; }
         if (!videoOk) {
-          if (stopped) throw new Error('Transmissão cancelada.');
+          if (audioTrack) audioTrack.stop();
+          worker.terminate(); worker = null;
           return { fallbackInline: true };
         }
-
-        // Áudio só depois da estratégia estar confirmada: a decisão de bloquear
-        // o som e a transferência acontecem aqui, e só aqui.
-        const audioTrack = prepararSom(originalTrack, stream);
         if (audioTrack) {
-          try {
-            postTrack(audioTrack, 'audioTrack');
-          } catch (err) {
-            audioTrack.stop();
-            console.warn('[broadcaster] track de áudio não transferível; seguindo sem som.');
-          }
+          try { postTrack(audioTrack, 'audioTrack'); } catch { audioTrack.stop(); }
         } else if (somBloqueado) {
           post({ type: 'audioTrack', track: null, somBloqueado: true });
         }
-
-        // A transmissão só está pronta quando a pipeline produz mídia de fato
-        // (primeiro chunk codificado + config enviada ao servidor).
-        try {
-          await waitFor('stream-ready', internals.streamReadyTimeoutMs ?? STREAM_READY_TIMEOUT_MS);
-        } catch (err) {
-          if (stopped) throw new Error('Transmissão cancelada.');
-          console.warn('[broadcaster] pipeline não produziu vídeo, caindo para inline:', err.message);
-          return { fallbackInline: true };
-        }
+        await started;
         running = true;
         return stream;
       },
       stop: (reason) => {
-        const wasRunning = running;
-        running = false;
-        try {
-          post({ type: 'stop', reason: reason ?? '' });
-        } catch {}
-        stream?.getTracks().forEach((t) => t.stop());
-        if (wasRunning) opts.onEnd?.(reason ?? '');
+        const was = running; running = false;
+        try { post({ type: 'stop', reason }); } catch {}
+        if (was) opts.onEnd?.(reason ?? '');
       },
       changeScreen: async () => {
-        const fresh = await navigator.mediaDevices.getDisplayMedia({
-          video: { frameRate: { ideal: opts.fps, max: opts.fps } },
-          audio: opts.audio ? audioConstraints() : false,
-        });
-        const previous = stream;
-        const track = fresh.getVideoTracks()[0];
-        if (hint) track.contentHint = hint;
-        track.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
-
-        const workerTrack = track.clone();
-        try {
-          postTrack(workerTrack, 'track');
-        } catch (err) {
-          workerTrack.stop();
-          throw new Error('Não foi possível transferir a nova tela para o worker.');
-        }
-
-        previous?.getTracks().forEach((t) => t.stop());
-        stream = fresh;
-
-        const novoAudio = prepararSom(track, fresh);
-        if (novoAudio) {
-          try {
-            postTrack(novoAudio, 'audioTrack');
-          } catch {
-            novoAudio.stop();
-          }
-        }
+        const fresh = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: opts.fps, max: opts.fps } }, audio: opts.audio ? audioConstraints() : false });
+        const prev = stream; const t = fresh.getVideoTracks()[0];
+        if (hint) t.contentHint = hint;
+        t.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
+        postTrack(t, 'track'); prev?.getTracks().forEach(tr => tr.stop()); stream = fresh;
         return fresh;
       },
       trocarSom: async () => {
-        const escolha = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-          audio: audioConstraints(),
-        });
-        const faixa = escolha.getAudioTracks()[0];
-        const superficie = escolha.getVideoTracks()[0]?.getSettings?.().displaySurface;
-        escolha.getVideoTracks().forEach((t) => t.stop());
-
-        if (!faixa) {
-          escolha.getTracks().forEach((t) => t.stop());
-          throw new Error(
-            'Essa escolha veio sem som. Escolha uma aba e marque "Compartilhar o áudio da guia".'
-          );
-        }
-        if (superficie !== 'browser') {
-          faixa.stop();
-          throw new Error(
-            'Só aba tem som isolado. Tela inteira traria o Discord junto e a call se ouviria.'
-          );
-        }
+        const es = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: audioConstraints() });
+        const f = es.getAudioTracks()[0]; const sup = es.getVideoTracks()[0]?.getSettings?.().displaySurface;
+        es.getVideoTracks().forEach(t => t.stop());
+        if (!f) throw new Error('Essa escolha veio sem som.');
+        if (sup !== 'browser') { f.stop(); throw new Error('Só aba tem som isolado.'); }
         somBloqueado = false;
-        try {
-          postTrack(faixa, 'swapAudio');
-        } catch {
-          faixa.stop();
-          throw new Error('Não foi possível transferir o áudio para o worker.');
-        }
-        return faixa;
+        try { postTrack(f, 'swapAudio'); } catch { f.stop(); throw new Error('Transferência de áudio falhou.'); }
+        return f;
       },
-      setQuality: ({ bitrate: nextBitrate, fps: nextFps } = {}) => {
-        post({ type: 'setQuality', bitrate: nextBitrate, fps: nextFps });
-      },
+      setQuality: (q) => post({ type: 'setQuality', ...q }),
       getSettings: () => ({ bitrate: opts.bitrate, fps: opts.fps }),
       temSom: () => hasAudio,
       somBloqueado: () => somBloqueado,
-      setPreviewActive: (v) => {
-        previewActive = v;
-        post({ type: 'previewState', previewActive: v, visibility });
-      },
-      setVisibility: (v) => {
-        visibility = v;
-        post({ type: 'previewState', previewActive, visibility: v });
-      },
+      setPreviewActive: (v) => { previewActive = v; post({ type: 'previewState', previewActive: v, visibility }); },
+      setVisibility: (v) => { visibility = v; post({ type: 'previewState', previewActive, visibility: v }); },
       getPreviewActive: () => previewActive,
     };
-  }
-
-  // ------------------------------------------------------------- inline-handle
-
-  // Fallback do worker: roda o pipeline inline na main thread reutilizando o
-  // MESMO stream já escolhido — nunca re-pede a tela. O track original está
-  // intacto porque a estratégia de worker só toca num clone.
-  function makeInlineHandle() {
-    const factory = internals.createInline ?? createInlineBroadcaster;
-    const b = factory({
-      ...opts,
-      stream,
-      onPhase: (p) => setPhase(p),
-    });
-    return {
-      ...b,
-      setPreviewActive: (v) => {
-        previewActive = v;
-        b.setPreviewActive?.(v);
-      },
-      setVisibility: (v) => {
-        visibility = v;
-        b.setVisibility?.(v);
-      },
-      getPreviewActive: () => previewActive,
-    };
-  }
-
-  // -------------------------------------------------------------------- API
-
-  async function startInline() {
-    backend = makeInlineHandle();
-    try {
-      const res = await backend.start();
-      if (stopped) throw new Error('Transmissão cancelada.');
-      running = true;
-      return res;
-    } catch (err) {
-      if (stopped) throw new Error('Transmissão cancelada.');
-      throw err;
-    }
   }
 
   async function start() {
-    stopped = false;
-    setPhase(PHASES.INITIALIZING);
-
+    opts.onPhase?.('INITIALIZING');
+    opts.onPhase?.('AWAITING_PICKER');
     stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: opts.fps, max: opts.fps } },
       audio: opts.audio ? audioConstraints() : false,
     });
-    setPhase(PHASES.CAPTURE_ACQUIRED);
+    opts.onPhase?.('CAPTURE_ACQUIRED');
 
-    const probe = internals.probeTransfer ?? canTransferTrack;
-    const canWork = workerSupported();
-    const probeResult = await probe();
-    console.warn('[facade-debug] canWork=%s probeResult=%s', canWork, probeResult);
-    if (canWork && probeResult) {
-      console.warn('[facade-debug] entrando worker path');
-      backend = makeWorkerHandle();
-      try {
-        const res = await backend.start();
-        if (stopped) throw new Error('Transmissão cancelada.');
-        // Clone/transfer/stream-ready falhou no worker → inline com o MESMO
-        // stream (o original nunca foi tocado). Fora do try: não entrar em loop.
-        if (res?.fallbackInline) return startInline();
-        running = true;
-        return res;
-      } catch (err) {
-        if (stopped) throw err;
-        console.warn('[facade-debug] worker path erro ao iniciar: %s', err.message);
-        // Worker falhou de outra forma (codec/network) — cai para inline.
-        try { worker?.terminate(); } catch {}
-        worker = null;
-        backend = null;
-        return startInline();
-      }
+    const handle = makeHandle();
+    const res = await handle.start();
+    if (res?.fallbackInline) {
+      opts.onPhase?.('FALLBACK_INLINE');
+      const inline = createInlineBroadcaster({ ...opts, stream });
+      return inline.start();
     }
-
-    return startInline();
+    return res;
   }
 
-  function stop(reason) {
-    stopped = true;
-    if (!backend) return;
-    backend.stop?.(reason);
-  }
-
-  function changeScreen() {
-    return backend?.changeScreen?.();
-  }
-
-  function trocarSom() {
-    return backend?.trocarSom?.();
-  }
-
-  function setQuality(q) {
-    backend?.setQuality?.(q);
-  }
-
-  function getSettings() {
-    return backend?.getSettings?.() ?? { bitrate: opts.bitrate, fps: opts.fps };
-  }
+  function stop(r) { /* delegate to handle if needed */ }
 
   return {
-    start,
-    stop,
-    changeScreen,
-    trocarSom,
-    setQuality,
-    getSettings,
-    getTelemetry: () => backend?.getTelemetry?.() ?? null,
-    temSom: () => backend?.temSom?.() ?? false,
-    somBloqueado: () => backend?.somBloqueado?.() ?? somBloqueado,
+    start, stop,
+    changeScreen: () => { throw new Error('worker changeScreen not implemented'); },
+    trocarSom: () => { throw new Error('worker trocarSom not implemented'); },
+    setQuality: () => {},
+    getSettings: () => ({ bitrate: opts.bitrate, fps: opts.fps }),
+    getTelemetry: () => null,
+    temSom: () => false,
+    somBloqueado: () => somBloqueado,
     isRunning: () => running,
     getMode: () => opts.mode ?? 'auto',
-    getPhase: () => phase,
-    setPreviewActive: (v) => backend?.setPreviewActive?.(v),
-    setVisibility: (v) => backend?.setVisibility?.(v),
-    getPreviewActive: () => backend?.getPreviewActive?.() ?? false,
+    setPreviewActive: () => {},
+    setVisibility: () => {},
+    getPreviewActive: () => false,
   };
 }
