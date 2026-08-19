@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { secretEnv } from './env-file.js';
 
 /**
  * Segredo lido na hora do uso, nunca na importação.
@@ -14,7 +15,7 @@ let cached = null;
 function secret() {
   if (cached) return cached;
 
-  cached = process.env.SESSION_SECRET;
+  cached = secretEnv('SESSION_SECRET');
   if (!cached) {
     // Em produção não existe padrão aceitável: sem segredo, não há assinatura.
     if (process.env.NODE_ENV === 'production') {

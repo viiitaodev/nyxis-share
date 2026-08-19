@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch index.js",
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node ingest/session.test.mjs"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
