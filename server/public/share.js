@@ -30,16 +30,16 @@ let ritmoAvisado = false;
  * decisão certa, porque fila no encoder vira atraso que nunca mais sai — mas
  * sem este aviso a pessoa escolhe 60, recebe 35 e não fica sabendo.
  */
-function conferirRitmo({ fps, seconds }) {
+function conferirRitmo({ encodedFps, seconds }) {
   const alvo = Number($('fps').value);
   if (ritmoAvisado || seconds < 4) return;
 
-  curtas = fps < alvo * 0.7 ? curtas + 1 : 0;
+  curtas = encodedFps < alvo * 0.7 ? curtas + 1 : 0;
   if (curtas < 4) return;
 
   ritmoAvisado = true;
   setStatus(
-    `Seu computador está entregando ~${fps} dos ${alvo} quadros pedidos. ` +
+    `Seu computador está entregando ~${encodedFps} dos ${alvo} quadros pedidos. ` +
       'Para uma imagem mais estável, pare e escolha uma taxa menor.',
     'aviso'
   );
@@ -95,6 +95,7 @@ function applyPresets() {
   const q = query.get('q');
   const fps = query.get('fps');
   const som = query.get('som');
+  const modo = query.get('modo');
 
   // A opção de som veio decidida da atividade, então a caixa some junto com os
   // seletores — repetir a mesma escolha aqui só confundiria.
@@ -107,16 +108,54 @@ function applyPresets() {
 
   if (q) $('quality').value = q;
   if (fps) $('fps').value = fps;
+  if (modo && ['auto', 'motion', 'text'].includes(modo)) $('mode').value = modo;
 
   for (const row of document.querySelectorAll('#setup .row')) row.hidden = true;
 
   const mbps = (Number($('quality').value) / 1e6).toFixed(1).replace('.', ',');
   const comSom = $('withAudio').checked ? ' · com som' : '';
-  $('presetLine').textContent = `${mbps} Mb/s · ${$('fps').value} fps${comSom}`;
+  const modoLabel = { auto: 'Auto', motion: 'Jogos', text: 'Texto' }[$('mode').value];
+  $('presetLine').textContent = `${modoLabel} · ${mbps} Mb/s · ${$('fps').value} fps${comSom}`;
   $('presetLine').hidden = false;
 }
 
 // -------------------------------------------------------------------- ações
+
+/**
+ * Preenche o painel "Detalhes da transmissão" com a telemetria real.
+ * FPS nunca é maquiado — vem dos contadores do encoder.
+ */
+function renderDetails(s) {
+  const list = $('detailList');
+  if (!list) return;
+  const rows = [
+    ['Resolução', s.resolution],
+    ['Capture FPS', String(s.captureFps)],
+    ['Encode FPS', String(s.encodedFps)],
+    ['Bitrate real', `${s.actualMbps.toFixed(1)} Mbps`],
+    ['Alvo', `${(s.targetBitrate / 1e6).toFixed(1)} Mbps`],
+    ['Codec', s.codec],
+    ['HW acceleration', s.hardwareAcceleration],
+    ['Encoder queue', String(s.encoderQueueSize)],
+    ['Dropped (pré-encode)', String(s.droppedBeforeEncode)],
+    ['Keyframes', String(s.keyframes)],
+    ['Content hint', s.contentHint],
+    ['Transport', s.transport],
+    ['Gargalo', s.bottleneck ?? '—'],
+  ];
+  list.replaceChildren(
+    ...rows.map(([k, v]) => {
+      const d = document.createElement('div');
+      d.className = 'detail-row';
+      const dt = document.createElement('dt');
+      dt.textContent = k;
+      const dd = document.createElement('dd');
+      dd.textContent = v;
+      d.append(dt, dd);
+      return d;
+    })
+  );
+}
 
 async function start() {
   curtas = 0;
@@ -131,16 +170,18 @@ async function start() {
     bitrate: Number($('quality').value),
     fps: Number($('fps').value),
     audio: $('withAudio').checked,
+    mode: $('mode')?.value ?? 'auto',
     onStatus: (s) =>
       setStatus(
-        `Codec: ${s.codec} · ${s.width}×${s.height} · captura ${s.direct ? 'direta' : 'via <video>'}`
+        `Codec: ${s.codec} · ${s.width}×${s.height} · captura ${s.direct ? 'direta' : 'via <video>'} · HW ${s.hardwareAcceleration}`
       ),
     onStats: (s) => {
       $('viewers').textContent = s.viewers;
-      $('fpsOut').textContent = `${s.fps} fps`;
-      $('bitrate').textContent = `${s.mbps.toFixed(1)} Mb/s`;
+      $('fpsOut').textContent = `${s.encodedFps} fps`;
+      $('bitrate').textContent = `${s.actualMbps.toFixed(1)} Mb/s`;
       $('elapsed').textContent =
         `${String(Math.floor(s.seconds / 60)).padStart(2, '0')}:${String(s.seconds % 60).padStart(2, '0')}`;
+      renderDetails(s);
       conferirRitmo(s);
     },
     onAviso: (msg) => {

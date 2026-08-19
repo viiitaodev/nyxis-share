@@ -8,6 +8,7 @@
  * Sem WebRTC porque a Activity não tem, e sem MediaRecorder porque o container
  * impõe piso de latência. WebCodecs codifica quadro a quadro e envia direto.
  */
+import { contentHintFor } from './broadcast-mode.mjs';
 
 // H264 costuma ter encoder por hardware; VP8 quase sempre cai em software, que
 // a 1080p derruba o framerate. Por isso as duas variantes de H264 vêm antes:
@@ -38,6 +39,11 @@ const AUDIO_BITRATE = 96_000;
 const MAX_W = 1920;
 const MAX_H = 1080;
 
+// Política de fila do encoder (Fase 5): >= 3 significa atraso acumulado.
+const DROP_QUEUE_THRESHOLD = 3;
+// Piso do bitrate no adaptive (Fase 6): não vale a pena mandar vídeo inútil.
+const MIN_BITRATE = 500_000;
+
 const even = (n) => Math.max(2, n - (n % 2));
 
 function fitWithin(w, h) {
@@ -67,6 +73,8 @@ export function supportError({ requireChromium = false } = {}) {
  * @param {number} opts.bitrate      bits por segundo
  * @param {number} opts.fps
  * @param {boolean} [opts.audio]     capturar também o som do computador
+ * @param {string} [opts.mode]       'auto' | 'motion' | 'text' — modo de conteúdo
+ * @param {string} [opts.contentHint] força o contentHint ('motion'|'text'); ignora mode
  * @param {(info:object)=>void} [opts.onStatus]  codec/resolução/caminho de captura
  * @param {(stats:object)=>void} [opts.onStats]  viewers, fps, mbps, segundos no ar
  * @param {(reason:string)=>void} [opts.onEnd]   encerrou (por qualquer motivo)
@@ -78,6 +86,8 @@ export function createBroadcaster({
   bitrate,
   fps,
   audio = false,
+  mode = 'auto',
+  contentHint = null,
   onStatus,
   onStats,
   onEnd,
@@ -98,6 +108,9 @@ export function createBroadcaster({
   let stage = null;
   let stageCtx = null;
 
+  // contentHint efetivo, decidido pelo modo quando não foi forçado.
+  const hint = contentHint || contentHintFor(mode);
+
   let running = false;
   let mySlot = 0;
   let wantKeyframe = true;
@@ -110,6 +123,22 @@ export function createBroadcaster({
   let viewers = 0;
   let statsTimer = null;
 
+  // Telemetria real (Fase 1) — nunca maquiar FPS.
+  let t = {
+    capturedFrames: 0,
+    submittedFrames: 0,
+    encodedFrames: 0,
+    droppedBeforeEncode: 0,
+    keyframes: 0,
+    maxEncoderQueue: 0,
+    capturePath: null, // 'direct' | 'video'
+    transport: 'WebSocket',
+    hardwareAcceleration: 'requested',
+  };
+  let lastTelemetry = null;
+  let feedback = null; // resumo do viewer (Fase 7)
+  const ADAPTIVE = { enabled: true, cooldownUntil: 0, lastDownshiftAt: 0 };
+
   async function start() {
     // Precisa vir do gesto do usuário; qualquer await antes disso o invalida.
     stream = await navigator.mediaDevices.getDisplayMedia({
@@ -121,9 +150,9 @@ export function createBroadcaster({
     });
 
     const track = stream.getVideoTracks()[0];
-    // Diz ao encoder que o conteúdo é tela (texto/UI), não vídeo natural —
-    // preserva nitidez das bordas em vez de suavizar.
-    track.contentHint = 'text';
+    // Diz ao encoder o tipo de conteúdo: 'text' preserva nitidez de UI,
+    // 'motion' prioriza movimento. No modo auto, deixamos o navegador decidir.
+    if (hint) track.contentHint = hint;
     track.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
 
     const s = track.getSettings();
@@ -152,20 +181,53 @@ export function createBroadcaster({
     srcH = 0;
     startedAt = Date.now();
 
+    t.capturePath = window.MediaStreamTrackProcessor ? 'direct' : 'video';
+    t.hardwareAcceleration = config.hardwareAcceleration ?? 'requested';
+
     onStatus?.({
       codec: config.codec,
       width: config.width,
       height: config.height,
-      direct: Boolean(window.MediaStreamTrackProcessor),
+      direct: t.capturePath === 'direct',
+      mode,
+      hint: hint ?? 'none',
+      hardwareAcceleration: t.hardwareAcceleration,
     });
 
     statsTimer = setInterval(() => {
-      onStats?.({
+      const now = Date.now();
+      const actualMbps = (bytes * 8) / 1e6;
+      const dt = (now - (lastTelemetry?.at ?? startedAt)) / 1000;
+      const sample = {
         viewers,
-        fps: frames,
-        mbps: (bytes * 8) / 1e6,
-        seconds: Math.floor((Date.now() - startedAt) / 1000),
-      });
+        captureFps: dt > 0 ? Math.round((t.capturedFrames - (lastTelemetry?.capturedFrames ?? 0)) / dt) : 0,
+        submittedFps: dt > 0 ? Math.round((t.submittedFrames - (lastTelemetry?.submittedFrames ?? 0)) / dt) : 0,
+        encodedFps: dt > 0 ? Math.round((t.encodedFrames - (lastTelemetry?.encodedFrames ?? 0)) / dt) : 0,
+        encoderQueueSize: encoder?.encodeQueueSize ?? 0,
+        droppedBeforeEncode: t.droppedBeforeEncode,
+        actualMbps: Number(actualMbps.toFixed(2)),
+        targetBitrate: bitrate,
+        codec: config.codec,
+        resolution: `${config.width}x${config.height}`,
+        contentHint: hint ?? 'none',
+        hardwareAcceleration: t.hardwareAcceleration,
+        bufferedAmount: ws?.bufferedAmount ?? 0,
+        transport: t.transport,
+        keyframes: t.keyframes,
+        mode,
+        seconds: Math.floor((now - startedAt) / 1000),
+        // Feedback agregado do viewer (chega via mensagem viewer-health).
+        feedback,
+        bottleneck: identifyBottleneck(sample, config),
+      };
+      lastTelemetry = { ...sample, at: now };
+      onStats?.(sample);
+
+      // Zerar os contadores incrementais para a próxima janela.
+      t.capturedFrames = 0;
+      t.submittedFrames = 0;
+      t.encodedFrames = 0;
+      t.droppedBeforeEncode = 0;
       bytes = 0;
       frames = 0;
     }, 1000);
@@ -351,18 +413,34 @@ export function createBroadcaster({
   }
 
   async function pickConfig(width, height) {
-    // Duas passadas: navegadores que não conhecem `latencyMode` podem recusar a
-    // configuração inteira por causa dela. Mais latência é melhor que nada.
-    for (const realtime of [true, false]) {
-      for (const candidate of CANDIDATES) {
-        const cfg = { ...candidate, width, height, bitrate, framerate: fps };
-        if (realtime) cfg.latencyMode = 'realtime';
-        try {
-          const { supported } = await VideoEncoder.isConfigSupported(cfg);
-          if (supported) return cfg;
-        } catch {
-          // candidato inválido neste navegador; tenta o próximo
+    // Três passadas, da mais específica para a mais tolerante:
+    //  1. prefer-hardware (quando o navegador conhece o campo)
+    //  2. sem o campo (deixa o navegador decidir)
+    //  3. sem latencyMode (navegadores que recusam a config inteira por causa dele)
+    // `hardwareAcceleration: 'prefer-hardware'` é um pedido, NUNCA uma prova de
+    // que a GPU foi usada — a UI mostra "requested", não o nome do backend.
+    const variantes = [];
+    for (const hw of ['prefer-hardware', undefined]) {
+      for (const realtime of [true, false]) {
+        for (const candidate of CANDIDATES) {
+          const cfg = { ...candidate, width, height, bitrate, framerate: fps };
+          if (hw) cfg.hardwareAcceleration = hw;
+          if (realtime) cfg.latencyMode = 'realtime';
+          variantes.push(cfg);
         }
+      }
+    }
+    // Passada final sem latencyMode, caso algum navegador recuse a config por ele.
+    for (const candidate of CANDIDATES) {
+      variantes.push({ ...candidate, width, height, bitrate, framerate: fps });
+    }
+
+    for (const cfg of variantes) {
+      try {
+        const { supported } = await VideoEncoder.isConfigSupported(cfg);
+        if (supported) return cfg;
+      } catch {
+        // candidato inválido neste navegador; tenta o próximo
       }
     }
     return null;
@@ -450,9 +528,18 @@ export function createBroadcaster({
       frame.close();
       return false;
     }
-    // Backpressure: fila no encoder vira latência que nunca mais sai.
-    if (encoder.encodeQueueSize > 2) {
+    t.capturedFrames++;
+
+    // Política de fila mensurável (Fase 5), em vez de limite mágico:
+    //   0–1: normal
+    //   2:   atenção — ainda codifica, mas sinaliza o adaptive controller
+    //   >=3: drop seletivo — nunca acumular atraso
+    const q = encoder.encodeQueueSize;
+    if (q > t.maxEncoderQueue) t.maxEncoderQueue = q;
+    if (q >= DROP_QUEUE_THRESHOLD) {
       frame.close();
+      t.droppedBeforeEncode++;
+      adaptiveSignal('encode-queue', q);
       return true;
     }
 
@@ -469,9 +556,11 @@ export function createBroadcaster({
       out = new VideoFrame(stage, { timestamp });
     }
 
+    t.submittedFrames++;
     try {
       encoder.encode(out, { keyFrame: wantKeyframe });
       if (wantKeyframe) {
+        t.keyframes++;
         lastKeyframeAt = now;
         wantKeyframe = false;
       }
@@ -481,7 +570,56 @@ export function createBroadcaster({
 
     out.close();
     frames++;
+    t.encodedFrames++;
+
+    // Adaptive bitrate (Fase 6): reage a fila/fps do encoder de forma rápida
+    // na descida e lenta na recuperação (com cooldown para não oscilar).
+    if (now > ADAPTIVE.cooldownUntil && q >= 2) {
+      adaptiveSignal('encode-queue', q);
+    }
     return true;
+  }
+
+  /**
+   * Fase 6 — reduz o bitrate sob pressão, com recuperação lenta.
+   * `source` identifica a métrica que disparou a mudança.
+   */
+  function adaptiveSignal(source, value) {
+    const now = Date.now();
+    if (now < ADAPTIVE.cooldownUntil) return;
+    if (now - ADAPTIVE.lastDownshiftAt < 4000) return; // hysteresis de descida
+    const novo = Math.max(MIN_BITRATE, Math.round(bitrate * 0.75));
+    if (novo === bitrate) return;
+    bitrate = novo;
+    ADAPTIVE.lastDownshiftAt = now;
+    ADAPTIVE.cooldownUntil = now + 8000; // recuperação lenta
+    if (encoder?.state === 'configured') {
+      config = { ...config, bitrate: novo };
+      encoder.configure(config);
+      wantKeyframe = true;
+    }
+    onAviso?.(
+      `Rede/encoder sob pressão — bitrate reduzido para ${(novo / 1e6).toFixed(1)} Mbps ` +
+        `(${source}). A qualidade volta a subir sozinha quando estabilizar.`
+    );
+  }
+
+  /**
+   * Diagnóstico objetivo do gargalo (Fase: meta). Nunca reduzir em silêncio:
+   * se o FPS real ficar abaixo do alvo, aponta onde está o limite.
+   */
+  function identifyBottleneck(sample, cfg) {
+    const target = cfg?.framerate ?? fps;
+    if (sample.encoderQueueSize >= 3) return 'ENCODER LIMITED';
+    if (sample.encodedFps > 0 && sample.captureFps >= target * 0.9 && sample.encodedFps < target * 0.7) {
+      return 'ENCODER LIMITED';
+    }
+    if (sample.captureFps < target * 0.7) return 'CAPTURE LIMITED';
+    if (sample.bufferedAmount > 2 * 1024 * 1024) return 'NETWORK LIMITED';
+    if (sample.feedback?.worstRenderedFps && sample.feedback.worstRenderedFps < target * 0.7) {
+      return 'VIEWER LIMITED';
+    }
+    return null;
   }
 
   /**
@@ -599,6 +737,8 @@ export function createBroadcaster({
         else if (msg.type === 'state') viewers = msg.viewers;
         // Alguém entrou na sala e precisa de um ponto de partida.
         else if (msg.type === 'need-keyframe') wantKeyframe = true;
+        // Fase 7 — resumo do feedback dos viewers (agregado pelo servidor).
+        else if (msg.type === 'viewer-health') feedback = msg.health ?? null;
         else if (msg.type === 'stop-request') stop('Transmissão encerrada pela atividade.');
         else if (msg.type === 'error') {
           if (running) stop(msg.message);
@@ -643,7 +783,7 @@ export function createBroadcaster({
 
     stream = fresh;
     const track = fresh.getVideoTracks()[0];
-    track.contentHint = 'text';
+    if (hint) track.contentHint = hint;
     track.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
 
     // Encerra o loop anterior antes de abrir outro, senão os dois disputam o
@@ -742,8 +882,10 @@ export function createBroadcaster({
     trocarSom,
     setQuality,
     getSettings,
+    getTelemetry: () => lastTelemetry ?? null,
     temSom: () => Boolean(audioEncoder),
     somBloqueado: () => somBloqueado,
     isRunning: () => running,
+    getMode: () => mode,
   };
 }

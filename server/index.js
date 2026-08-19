@@ -690,6 +690,12 @@ function handleViewer(ws, room, auth) {
       return;
     }
 
+    // Fase 7 — telemetria do viewer, agregada e repassada ao broadcaster.
+    if (msg.type === 'viewer-feedback' && Number.isInteger(msg.slot) && msg.telemetry) {
+      R.viewerFeedback(room, ws, msg.slot, msg.telemetry);
+      return;
+    }
+
     // Encerrar a própria transmissão de dentro da Activity, sem ter que achar
     // a aba de captura. Cada um só encerra a sua.
     if (msg.type === 'stop-broadcast') {

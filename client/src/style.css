@@ -845,6 +845,16 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.panel-sub {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #111214;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .panel-btn {
   width: 100%;
   margin-top: 10px;
@@ -1175,6 +1185,30 @@ button {
   color: var(--muted);
   font-size: 12.5px;
   line-height: 1.5;
+}
+
+/* Seção "Opções avançadas" recolhida por padrão — não expõe complexidade. */
+.modal-advanced {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111214;
+}
+
+.modal-advanced summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.modal-advanced[open] summary {
+  margin-bottom: 8px;
+}
+
+.modal-advanced .field-check {
+  margin-top: 6px;
 }
 
 .modal-actions {

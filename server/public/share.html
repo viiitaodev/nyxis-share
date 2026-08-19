@@ -8,7 +8,7 @@
          dos cabeçalhos no-store guardou a versão antiga por heurística do
          navegador, e continuaria usando ela para sempre. Trocar a query força
          uma URL nova. Incremente ao publicar mudanças nesses arquivos. -->
-    <link rel="stylesheet" href="/share.css?v=9" />
+    <link rel="stylesheet" href="/share.css?v=11" />
   </head>
   <body>
     <main class="card">
@@ -19,10 +19,18 @@
 
       <section id="setup">
         <div class="row">
+          <label for="mode">Modo</label>
+          <select id="mode">
+            <option value="auto" selected>Automático</option>
+            <option value="motion">Jogos / Movimento</option>
+            <option value="text">Texto / Trabalho</option>
+          </select>
+        </div>
+
+        <div class="row">
           <label for="quality">Qualidade</label>
           <select id="quality">
-            <option value="1000000">Leve — 1 Mbps</option>
-            <option value="2500000" selected>Boa — 2,5 Mbps</option>
+            <option value="2500000">Boa — 2,5 Mbps</option>
             <option value="5000000">Alta — 5 Mbps</option>
             <option value="8000000">Máxima — 8 Mbps</option>
           </select>
@@ -31,9 +39,8 @@
         <div class="row">
           <label for="fps">Taxa de quadros</label>
           <select id="fps">
-            <option value="15">15 fps — economiza banda</option>
-            <option value="30" selected>30 fps — mais fluido</option>
-            <option value="60">60 fps — jogo e vídeo, exija 5 Mbps ou mais</option>
+            <option value="30" selected>30 fps</option>
+            <option value="60">60 fps</option>
           </select>
         </div>
 
@@ -61,6 +68,12 @@
           <div><strong id="bitrate">—</strong><span>enviando</span></div>
           <div><strong id="elapsed">00:00</strong><span>no ar</span></div>
         </div>
+
+        <details id="details" class="details">
+          <summary>Detalhes da transmissão</summary>
+          <dl id="detailList"></dl>
+        </details>
+
         <button id="somAba" class="secondary" hidden>Som de uma aba</button>
         <button id="stop" class="danger">Parar de transmitir</button>
       </section>
@@ -72,6 +85,6 @@
       </footer>
     </main>
 
-    <script type="module" src="/share.js?v=10"></script>
+    <script type="module" src="/share.js?v=11"></script>
   </body>
 </html>

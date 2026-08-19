@@ -107,6 +107,38 @@ O worklet daria precisão por amostra, mas exige um arquivo carregado por URL, e
 dentro da atividade toda URL passa pelo proxy do Discord — um caminho a mais
 para dar errado, em troca de precisão que pacotes de 20 ms não pedem.
 
+## Modos de conteúdo e telemetria
+
+O pipeline aceita um **modo** (`auto`, `motion`, `text`) que decide o
+`contentHint` e o comportamento do encoder:
+
+- `motion` → `contentHint: 'motion'`; prioriza FPS e fluidez (jogo/vídeo).
+- `text` → `contentHint: 'text'`; prioriza nitidez (UI/trabalho).
+- `auto` → deixa o navegador decidir (comportamento equilibrado).
+
+O mode não muda o protocolo — só afeta a captura e o encode na origem.
+
+### Telemetria real
+
+Cada lado mede e reporta o FPS **real**, nunca estimado:
+
+- **Broadcaster** (`shared/broadcaster.js`): captureFps, submittedFps,
+  encodedFps, encoderQueueSize, droppedBeforeEncode, actualMbps, codec,
+  resolução, contentHint, hardwareAcceleration (como *requested*), WS
+  bufferedAmount, keyframes e um diagnóstico de gargalo.
+- **Viewer** (`client/src/player.js`): receivedFps, decodedFps, renderedFps,
+  decodeQueueSize, droppedFrames, estimatedLatencyMs.
+- **Servidor** (`server/rooms.js`): agrega o feedback dos viewers e envia um
+  resumo compacto (`viewer-health`) ao broadcaster ~1x/s.
+
+### Política de fila e adaptive bitrate
+
+A fila do encoder não tem um limite mágico: a política é medida por faixa
+(`0–1` normal, `2` atenção, `>=3` drop seletivo). Quando a fila ou o feedback
+indicam pressão, o **AdaptiveQualityController** reduz o bitrate com rapidez e
+se recupera devagar (com cooldown), evitando oscilação. O descarte de quadro
+antigo prioriza "viver no presente" a reproduzir vídeo com segundos de atraso.
+
 ## Protocolo
 
 Cada pacote trafega como binário puro:

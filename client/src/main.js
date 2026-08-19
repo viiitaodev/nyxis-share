@@ -853,12 +853,46 @@ function ensureStatsTimer() {
     $('pFps').textContent = `${s.player.takeFrameCount()} fps`;
     $('pRes').textContent = s.player.getSizes().video;
 
+    // Telemetria real + feedback do viewer (Fase 1/7).
+    const t = s.player.takeTelemetry(1);
+    renderViewerDetails(s, t);
+    sendViewerFeedback(t);
+
     // Quatro estados diferentes que, sem isto, parecem todos "sem som".
     if (!s.audio) $('pSom').textContent = 'a transmissão não tem áudio';
     else if (!s.audio.temSom()) $('pSom').textContent = 'aguardando o áudio…';
     else if (volume === 0) $('pSom').textContent = 'silenciado aqui';
     else $('pSom').textContent = `tocando · ${Math.round(volume * 100)}%`;
   }, 1000);
+}
+
+/**
+ * Fase 7 — manda feedback compacto do viewer ao servidor, que agrega e repassa
+ * ao broadcaster. Enviado ~1x/s, nunca dezenas de mensagens por segundo.
+ */
+function sendViewerFeedback(t) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const active = streams.get(activeSlot) ?? streams.values().next().value;
+  if (!active || t.renderedFps === 0 && t.receivedFps === 0) return;
+  ws.send(
+    JSON.stringify({
+      type: 'viewer-feedback',
+      slot: slotOf(active.userId),
+      telemetry: t,
+    })
+  );
+}
+
+/** Preenche o painel "Detalhes" do viewer com a telemetria real. */
+function renderViewerDetails(s, t) {
+  const panel = $('panel');
+  if (!panel) return;
+  const el = $('viewerDetails');
+  if (el) {
+    el.textContent =
+      `${s.player.getSizes().video} · R ${t.renderedFps}fps · D ${t.decodedFps}fps · ` +
+      `Q ${t.decodeQueueSize} · drop ${t.droppedFrames}`;
+  }
 }
 
 // ------------------------------------------------------------------- arranque
@@ -1713,6 +1747,7 @@ async function broadcastFromHere() {
     bitrate: Number($('mQuality').value),
     fps: Number($('mFps').value),
     audio: $('mAudio').checked,
+    mode: $('mMode')?.value ?? 'auto',
     onAviso: (m) => toast(m, true),
     onEnd: () => {
       myBroadcast = null;
@@ -1768,6 +1803,7 @@ $('modalGo').addEventListener('click', async () => {
   url.searchParams.set('q', $('mQuality').value);
   url.searchParams.set('fps', $('mFps').value);
   url.searchParams.set('som', $('mAudio').checked ? '1' : '0');
+  url.searchParams.set('modo', $('mMode')?.value ?? 'auto');
 
   if (inDiscord) {
     try {

@@ -377,6 +377,50 @@ const run = async () => {
   check('unwatch corta o envio daquele slot', binsOfSlot(viewer, slot1).length === 1);
   check('o outro slot continua chegando', binsOfSlot(viewer, slot2).length === 1);
 
+  // ---------------------------------------------------- feedback do viewer
+  // Fase 7: o viewer envia telemetria; o servidor agrega e repassa
+  // `viewer-health` ao broadcaster daquele slot.
+  c1.recv.json.length = 0;
+  viewer.send(
+    JSON.stringify({
+      type: 'viewer-feedback',
+      slot: slot1,
+      telemetry: {
+        renderedFps: 58,
+        decodedFps: 59,
+        decodeQueueSize: 0,
+        estimatedLatencyMs: 120,
+        droppedFrames: 0,
+      },
+    })
+  );
+  await sleep(200);
+  const fb = c1.recv.json.find((m) => m.type === 'viewer-health');
+  check(
+    'feedback do viewer chega agregado ao broadcaster',
+    Boolean(fb?.health) && fb.health.worstRenderedFps === 58,
+    JSON.stringify(fb?.health ?? null)
+  );
+
+  // Viewer lento é sinalizado para o broadcaster reduzir (adaptive bitrate).
+  // Espera >1s para respeitar o cooldown do viewer-health (1 msg/segundo).
+  await sleep(1100);
+  c1.recv.json.length = 0;
+  viewer.send(
+    JSON.stringify({
+      type: 'viewer-feedback',
+      slot: slot1,
+      telemetry: { renderedFps: 20, decodedFps: 25, decodeQueueSize: 5, estimatedLatencyMs: 800, droppedFrames: 40 },
+    })
+  );
+  await sleep(200);
+  const fbRuim = c1.recv.json.find((m) => m.type === 'viewer-health');
+  check(
+    'viewer lento é reportado como congested',
+    Boolean(fbRuim?.health) && fbRuim.health.congestedViewers >= 1,
+    JSON.stringify(fbRuim?.health ?? null)
+  );
+
   // -------------------------------------------------------------- apelido
   viewer.send(JSON.stringify({ type: 'rename', name: '  Alice   Renomeada  ' }));
   await sleep(120);
