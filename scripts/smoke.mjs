@@ -420,6 +420,113 @@ const run = async () => {
     !c2.recv.json.some((m) => m.type === 'stop-request')
   );
 
+  // ============================================================= ingest nativo
+  // O gateway conecta no relay quando o ffmpeg começa a emitir keyframes. Em
+  // testes isso exige o shim: rode o servidor com
+  //   FFMPEG_PATH="node scripts/ffmpeg-shim.mjs" node server/index.js
+  const ingestRoom = (
+    await api('/api/rooms/create', { identity: alice.identity, name: 'Ingest' })
+  ).body;
+  const ingestViewer = await openViewer(ingestRoom);
+  await sleep(150);
+
+  const semAuthIngest = await api('/api/ingest/session', {
+    roomId: ingestRoom.roomId,
+    roomToken: ingestRoom.viewerToken,
+    profile: '1080p60',
+  });
+  check('ingest sem identidade e recusado', semAuthIngest.status === 401);
+
+  const perfilRuim = await api('/api/ingest/session', {
+    identity: alice.identity,
+    roomId: ingestRoom.roomId,
+    roomToken: ingestRoom.viewerToken,
+    profile: '999p99',
+  });
+  check('ingest com perfil invalido devolve 400', perfilRuim.status === 400);
+
+  const tokenDeOutro = (
+    await api('/api/rooms/join', { identity: bob.identity, roomId: ingestRoom.roomId })
+  ).body;
+  const alheio = await api('/api/ingest/session', {
+    identity: alice.identity,
+    roomId: ingestRoom.roomId,
+    roomToken: tokenDeOutro.viewerToken,
+    profile: '1080p60',
+  });
+  check('ingest com roomToken de outra pessoa e recusado', alheio.status === 403);
+
+  const semSalaIngest = await api('/api/ingest/session', {
+    identity: alice.identity,
+    roomId: 'naoexiste',
+    roomToken: ingestRoom.viewerToken,
+    profile: '1080p60',
+  });
+  check('ingest em sala inexistente devolve 404', semSalaIngest.status === 404);
+
+  const criada = await api('/api/ingest/session', {
+    identity: alice.identity,
+    roomId: ingestRoom.roomId,
+    roomToken: ingestRoom.viewerToken,
+    profile: '1080p60',
+  });
+  check(
+    'ingest cria sessao com alvo SRT e senderToken',
+    criada.status === 200 &&
+      criada.body.publish?.protocol === 'srt' &&
+      Number.isInteger(criada.body.publish?.port) &&
+      Boolean(criada.body.senderToken),
+    JSON.stringify(criada.body.publish ?? {})
+  );
+
+  const resolveOk = await api('/api/ingest/session/resolve', { token: criada.body.senderToken });
+  check(
+    'resolve aceita o senderToken e devolve a mesma porta',
+    resolveOk.status === 200 && resolveOk.body.publish?.port === criada.body.publish?.port
+  );
+
+  const resolveRuim = await api('/api/ingest/session/resolve', { token: 'forjado' });
+  check('resolve rejeita token invalido', resolveRuim.status === 401);
+
+  // O gateway (com o shim emitindo keyframes) conecta como broadcaster.
+  let virouBroadcaster = false;
+  for (let i = 0; i < 30 && !virouBroadcaster; i++) {
+    await sleep(200);
+    const st = lastState(ingestViewer);
+    virouBroadcaster = Boolean(
+      st?.broadcasting && st?.streams?.some((s) => s.userId === alice.user.id)
+    );
+  }
+  check('gateway conecta como broadcaster e a sala ve o stream', virouBroadcaster);
+
+  const stopProibido = await api('/api/ingest/session/stop', {
+    sessionId: criada.body.sessionId,
+    identity: bob.identity,
+  });
+  check('stop com identidade de outra pessoa e recusado', stopProibido.status === 403);
+
+  const stopInexistente = await api('/api/ingest/session/stop', {
+    sessionId: 'naoexiste',
+    token: criada.body.senderToken,
+  });
+  check('stop de sessao inexistente devolve 404', stopInexistente.status === 404);
+
+  const stopOk = await api('/api/ingest/session/stop', {
+    sessionId: criada.body.sessionId,
+    token: criada.body.senderToken,
+  });
+  check('stop com senderToken encerra a sessao', stopOk.status === 200);
+
+  await sleep(400);
+  const aposStop = lastState(ingestViewer);
+  check(
+    'apos o stop a sala nao mostra mais a transmissao',
+    !aposStop?.broadcasting || !aposStop?.streams?.some((s) => s.userId === alice.user.id)
+  );
+
+  ingestViewer.close();
+  await sleep(80);
+
   // ------------------------------------------------------ espelho do avatar
   const avatarOk = await fetch(`${BASE}/api/avatar/123456789012345678/${'a'.repeat(32)}`);
   check('avatar com formato valido e repassado ao Discord', avatarOk.status === 404, 'hash inexistente responde 404');

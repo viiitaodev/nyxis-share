@@ -1184,6 +1184,61 @@ button {
   margin-top: 18px;
 }
 
+/* ------------------------------------------------------ modo de compartilhar */
+
+/* Dois modos no início do modal: rápido (browser) e alta qualidade (Sender).
+   O ativo ganha a cor de destaque; o outro fica discreto ao lado. */
+.modal-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 0 0 18px;
+}
+
+.mode-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  text-align: left;
+  background: #111214;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.mode-btn strong {
+  color: inherit;
+  font-size: 13px;
+}
+
+.mode-btn span {
+  font-size: 11.5px;
+  opacity: 0.85;
+}
+
+.mode-btn.on {
+  background: color-mix(in srgb, var(--accent) 16%, #111214);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Selo da origem no tile: marca streams vindos do Nyxis Share Sender. */
+.tile-src {
+  margin-left: 6px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 5px;
+}
+
 /* ------------------------------------------------------------------ volume */
 
 /* O cursor aparece ao pousar sobre o alto-falante. Um clique ainda silencia —

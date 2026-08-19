@@ -216,44 +216,84 @@
           <h2 id="modalTitle">Compartilhar sua tela</h2>
           <p id="modalSub" class="modal-sub">Escolha a tela e comece a transmitir.</p>
 
-          <label class="field">
-            <span>Qualidade</span>
-            <select id="mQuality">
-              <option value="1000000">Leve — 1 Mbps</option>
-              <option value="2500000" selected>Boa — 2,5 Mbps</option>
-              <option value="5000000">Alta — 5 Mbps</option>
-              <option value="8000000">Máxima — 8 Mbps</option>
-            </select>
-          </label>
+          <div class="modal-modes" role="group" aria-label="Modo de compartilhamento">
+            <button id="modeRapido" class="mode-btn on" type="button">
+              <strong>Compartilhamento rápido</strong>
+              <span>Browser · começa na hora</span>
+            </button>
+            <button id="modeNativo" class="mode-btn" type="button">
+              <strong>Alta qualidade</strong>
+              <span>Nyxis Share Sender · 60 fps estáveis</span>
+            </button>
+          </div>
 
-          <label class="field">
-            <span>Taxa de quadros</span>
-            <select id="mFps">
-              <option value="15">15 fps — economiza banda</option>
-              <option value="30" selected>30 fps — mais fluido</option>
-              <option value="60">60 fps — jogo e vídeo, exija 5 Mbps ou mais</option>
-            </select>
-          </label>
+          <div id="quickFields">
+            <label class="field">
+              <span>Qualidade</span>
+              <select id="mQuality">
+                <option value="1000000">Leve — 1 Mbps</option>
+                <option value="2500000" selected>Boa — 2,5 Mbps</option>
+                <option value="5000000">Alta — 5 Mbps</option>
+                <option value="8000000">Máxima — 8 Mbps</option>
+              </select>
+            </label>
 
-          <label class="field-check">
-            <input id="mAudio" type="checkbox" />
-            <span>
-              Compartilhar o som
-              <em class="opt">
-                O som só vem de uma <strong>aba do navegador</strong> — escolha uma aba na
-                janela seguinte e marque "Compartilhar o áudio da guia". Tela inteira
-                carregaria o som do Discord junto, e a call se ouviria em eco.
-              </em>
-            </span>
-          </label>
+            <label class="field">
+              <span>Taxa de quadros</span>
+              <select id="mFps">
+                <option value="15">15 fps — economiza banda</option>
+                <option value="30" selected>30 fps — mais fluido</option>
+                <option value="60">60 fps — jogo e vídeo, exija 5 Mbps ou mais</option>
+              </select>
+            </label>
 
-          <button id="modalSwap" class="panel-btn" hidden>Trocar a tela compartilhada</button>
-          <button id="modalSom" class="panel-btn" hidden>Som de uma aba</button>
+            <label class="field-check">
+              <input id="mAudio" type="checkbox" />
+              <span>
+                Compartilhar o som
+                <em class="opt">
+                  O som só vem de uma <strong>aba do navegador</strong> — escolha uma aba na
+                  janela seguinte e marque "Compartilhar o áudio da guia". Tela inteira
+                  carregaria o som do Discord junto, e a call se ouviria em eco.
+                </em>
+              </span>
+            </label>
 
-          <p id="modalNote" class="modal-note">
-            Se o Discord não permitir capturar aqui dentro, a escolha da tela abre numa aba do
-            seu navegador — e aí transmitir exige Chrome, Edge ou outro Chromium.
-          </p>
+            <button id="modalSwap" class="panel-btn" hidden>Trocar a tela compartilhada</button>
+            <button id="modalSom" class="panel-btn" hidden>Som de uma aba</button>
+
+            <p id="modalNote" class="modal-note">
+              Se o Discord não permitir capturar aqui dentro, a escolha da tela abre numa aba do
+              seu navegador — e aí transmitir exige Chrome, Edge ou outro Chromium.
+            </p>
+          </div>
+
+          <div id="nativeFields" hidden>
+            <label class="field">
+              <span>Qualidade</span>
+              <select id="nProfile">
+                <option value="720p30">720p · 30 fps · 3–5 Mbps</option>
+                <option value="720p60">720p · 60 fps · 5–7 Mbps</option>
+                <option value="1080p30">1080p · 30 fps · 5–8 Mbps</option>
+                <option value="1080p60" selected>1080p · 60 fps · 8–15 Mbps</option>
+              </select>
+            </label>
+
+            <p id="nativeStatus" class="modal-note"></p>
+
+            <div class="modal-actions" id="nativeActions" hidden>
+              <button id="nativeCopy" class="btn">Copiar link do Sender</button>
+              <button id="nativeDownload" class="btn">
+                <a
+                  href="https://github.com/viiitaodev/nyxis-share/tree/main/apps/sender"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Baixar Sender</a>
+              </button>
+            </div>
+
+            <button id="nativeBack" class="panel-btn">Usar compartilhamento rápido</button>
+          </div>
 
           <div class="modal-actions">
             <button id="modalCancel" class="btn">Cancelar</button>
