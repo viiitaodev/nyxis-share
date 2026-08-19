@@ -218,40 +218,6 @@ body {
   font-size: 13px;
 }
 
-/* No palco, os controles moram no fim da lateral como na call nativa. A barra
-   deixa de reservar altura sob o vídeo e o palco ganha essa área inteira. */
-.sidebar > .bottombar {
-  flex: 0 0 auto;
-  width: 100%;
-  margin-top: auto;
-  padding: 10px 0 0;
-  align-items: stretch;
-  border-top: 1px solid var(--line);
-}
-
-.sidebar > .bottombar .dock {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-}
-
-.sidebar > .bottombar .group {
-  display: contents;
-}
-
-.sidebar > .bottombar .btn {
-  min-width: 0;
-  justify-content: center;
-}
-
-.sidebar > .bottombar .btn.wide {
-  grid-column: span 2;
-}
-
-.sidebar > .bottombar .panel {
-  width: 100%;
-}
-
 .divider {
   position: relative;
   cursor: col-resize;
