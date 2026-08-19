@@ -577,6 +577,10 @@ export function watch(room, ws, slot) {
   ws.__primed.delete(slot);
 
   if (entry.config) sendJson(ws, { type: 'config', slot, config: entry.config });
+  // Se o espectador chegou no intervalo entre o stream-start e o primeiro
+  // chunk, a configuração ainda pode não ter sido guardada. Peça-a de novo ao
+  // transmissor: sem decoderConfig, receber um keyframe sozinho não basta.
+  else sendJson(entry.ws, { type: 'need-config' });
   if (entry.audioConfig) {
     sendJson(ws, { type: 'audio-config', slot, config: entry.audioConfig });
   }

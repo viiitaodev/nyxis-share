@@ -368,6 +368,13 @@ function buildSidebar() {
   return barra;
 }
 
+/** O Discord pode omitir o nome exibido em uma sessão renovada. Nunca deixe
+ * esse dado de rede virar o texto literal "null" no palco. */
+function participanteSeguro(p) {
+  const nome = typeof p?.name === 'string' ? p.name.trim() : '';
+  return { ...p, name: nome || 'Participante' };
+}
+
 function secaoTitulo(texto) {
   const t = document.createElement('h2');
   t.className = 'sidebar-title';
@@ -1564,7 +1571,7 @@ function connect() {
     const msg = JSON.parse(e.data);
 
     if (msg.type === 'state') {
-      participants = msg.participants ?? [];
+      participants = (msg.participants ?? []).map(participanteSeguro);
       abas.clear();
       for (const uid of msg.abas ?? []) abas.add(uid);
 
@@ -1579,7 +1586,7 @@ function connect() {
       const live = new Set((msg.streams ?? []).map((s) => s.slot));
       for (const s of msg.streams ?? []) {
         const info = available.get(s.slot) ?? { userId: s.userId, config: null };
-        info.watchers = s.watchers ?? [];
+        info.watchers = (s.watchers ?? []).map(participanteSeguro);
         // Servidor antigo não manda fonte; tela é o que sempre houve.
         info.fonte = s.fonte ?? 'tela';
         available.set(s.slot, info);
