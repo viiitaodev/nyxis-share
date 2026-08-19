@@ -25,11 +25,9 @@ const streams = new Map(); // slot -> { userId, canvas, player }
 const available = new Map(); // slot -> { userId, config }
 const watching = new Set(); // slots que eu pedi para assistir
 
-// Estado de assinatura (fix Bug 4): entre pedir para assistir e o config/primeiro
-// quadro chegarem, a UI mostra "Conectando" — nunca de volta o botão "Ver minha
-// tela". O timer existe para dizer, sem cancelar, que o vídeo está demorando.
-const watchTimers = new Map(); // slot -> setTimeout
-const noConfigSlots = new Set(); // slots em que o config demorou demais (5s)
+// Quem tem aba de captura aberta, segundo o servidor. É o que decide entre
+// falar com a aba existente e abrir outra.
+const abas = new Set();
 
 let sdk = null;
 let session = null;
@@ -127,51 +125,43 @@ function initials(name) {
     .toUpperCase();
 }
 
-const slotOf = (userId) =>
-  [...available.entries()].find(([, a]) => a.userId === userId)?.[0] ?? null;
+/** Todas as transmissões de uma pessoa — hoje até duas: a tela e a câmera. */
+const slotsOf = (userId) =>
+  [...available.entries()].filter(([, a]) => a.userId === userId).map(([slot]) => slot);
 
-function scheduleWatchTimer(slot) {
-  clearWatchTimer(slot);
-  watchTimers.set(
-    slot,
-    setTimeout(() => {
-      watchTimers.delete(slot);
-      noConfigSlots.add(slot);
-      renderGrid();
-    }, 5000)
-  );
-}
-
-function clearWatchTimer(slot) {
-  const t = watchTimers.get(slot);
-  if (t) {
-    clearTimeout(t);
-    watchTimers.delete(slot);
+/**
+ * O que o grid desenha: uma entrada por transmissão, mais uma por pessoa que
+ * não está transmitindo.
+ *
+ * Antes era uma entrada por pessoa, com o slot deduzido dela. Bastava enquanto
+ * ninguém podia ter duas — a partir da câmera, a segunda transmissão
+ * simplesmente não aparecia, e o motivo não ficava visível em lugar nenhum.
+ */
+function entradasDoGrid() {
+  const saida = [];
+  for (const p of participants) {
+    const slots = p.broadcasting ? slotsOf(p.id) : [];
+    if (!slots.length) saida.push({ p, slot: null });
+    else for (const slot of slots) saida.push({ p, slot });
   }
-  noConfigSlots.delete(slot);
+  return saida;
 }
 
 function watchSlot(slot) {
   const info = available.get(slot);
   if (!info) return;
-  console.debug('[viewer] watch-request', { slot });
   watching.add(slot);
   ws?.send(JSON.stringify({ type: 'watch', slot }));
   // O config pode já ter chegado; se não, ele chega logo e dispara o start.
-  // Enquanto isso a UI mostra "Conectando" (fix Bug 4).
   if (info.config) {
-    clearWatchTimer(slot);
     openStream(slot, info.userId);
     startStream(slot, info.config);
-  } else {
-    scheduleWatchTimer(slot);
   }
   renderGrid();
 }
 
 function unwatchSlot(slot) {
   watching.delete(slot);
-  clearWatchTimer(slot);
   ws?.send(JSON.stringify({ type: 'unwatch', slot }));
   closeStream(slot);
   renderGrid();
@@ -266,7 +256,7 @@ function renderGrid() {
   } else if (activeSlot === null || !available.has(activeSlot)) {
     // Sempre há uma tela em destaque quando existe transmissão: chegar numa
     // sala com tela no ar e ver só avatares esconderia o que importa.
-    activeSlot = casters.map((p) => slotOf(p.id)).find((s) => s !== null) ?? null;
+    activeSlot = entradasDoGrid().find((e) => e.slot !== null)?.slot ?? null;
   }
 
   const noPalco = activeSlot !== null;
@@ -292,8 +282,9 @@ function renderGrid() {
   grid.replaceChildren();
 
   if (!noPalco) {
-    grid.style.setProperty('--cols', columnsFor(participants.length));
-    grid.append(...participants.map((p) => buildTile(p).el));
+    const entradas = entradasDoGrid();
+    grid.style.setProperty('--cols', columnsFor(entradas.length));
+    grid.append(...entradas.map((e) => buildTile(e.p, { slot: e.slot }).el));
     return;
   }
 
@@ -303,12 +294,15 @@ function renderGrid() {
     name: 'Transmitindo',
     broadcasting: true,
   };
-  grid.append(buildTile(emCena, { palco: true }).el);
+  // O slot em destaque, e não o da pessoa: cada transmissão tem um nó de canvas
+  // só, então montar o palco com o slot errado o arranca do tile que o estava
+  // mostrando — e um dos dois fica preto, conforme a ordem do desenho.
+  grid.append(buildTile(emCena, { palco: true, slot: activeSlot }).el);
 
   if (telaCheia) return;
 
   applyStrip();
-  grid.append(divider, buildSidebar(casters));
+  grid.append(divider, buildSidebar());
 }
 
 /**
@@ -318,14 +312,16 @@ function renderGrid() {
  * confere. Cada uma no formato que merece — a tela como miniatura, a pessoa
  * como linha, que cabe muito mais gente no mesmo espaço.
  */
-function buildSidebar(casters) {
+function buildSidebar() {
   const barra = document.createElement('aside');
   barra.className = 'sidebar';
 
-  const outras = casters.filter((p) => slotOf(p.id) !== activeSlot);
+  // Por transmissão, e não por pessoa: quem divide tela e câmera tem duas
+  // miniaturas aqui, e a que está no palco é a única que não se repete.
+  const outras = entradasDoGrid().filter((e) => e.slot !== null && e.slot !== activeSlot);
   if (outras.length) {
-    barra.append(secaoTitulo(outras.length === 1 ? 'Outra tela' : 'Outras telas'));
-    for (const p of outras) barra.append(buildTile(p).el);
+    barra.append(secaoTitulo(outras.length === 1 ? 'Outra transmissão' : 'Outras transmissões'));
+    for (const e of outras) barra.append(buildTile(e.p, { slot: e.slot }).el);
   }
 
   barra.append(contagemPessoas());
@@ -377,8 +373,11 @@ function contagemPessoas() {
  * a mesma pessoa aparecer no palco e na lista de pessoas sem que os dois
  * disputem o único canvas daquela transmissão.
  */
-function buildTile(p, { palco = false, semVideo = false } = {}) {
-  const slot = p.broadcasting && !semVideo ? slotOf(p.id) : null;
+function buildTile(p, { palco = false, semVideo = false, slot: slotDado = null } = {}) {
+  // O slot é obrigatório para quem quer vídeo, e não deduzido da pessoa: com
+  // duas fontes por pessoa não existe "a transmissão dela". Quem passa
+  // `semVideo` quer só o avatar, e aí não há slot para acertar.
+  const slot = p.broadcasting && !semVideo ? slotDado : null;
   const stream = slot !== null ? streams.get(slot) : null;
   const isMe = p.id === session?.user?.id;
 
@@ -393,13 +392,22 @@ function buildTile(p, { palco = false, semVideo = false } = {}) {
     tile.style.aspectRatio = `${stream.canvas.width} / ${stream.canvas.height}`;
   }
 
+  // Sem rótulo, dois tiles da mesma pessoa lado a lado no grid não se
+  // distinguem até alguém clicar em um deles.
+  if (slot !== null && available.get(slot)?.fonte === 'camera') {
+    const marca = document.createElement('span');
+    marca.className = 'tile-fonte';
+    marca.textContent = 'Câmera';
+    tile.append(marca);
+  }
+
   const aoClicar = () => {
     if (palco) telaCheia = !telaCheia;
     else activeSlot = slot;
     renderGrid();
   };
 
-if (stream) {
+  if (stream) {
     tile.append(stream.canvas);
     tile.title = palco
       ? telaCheia
@@ -430,10 +438,6 @@ if (stream) {
       unwatchSlot(slot);
     });
     tile.append(stop);
-  } else if (slot !== null && watching.has(slot)) {
-    // Já pedi para assistir e o vídeo ainda não chegou (fix Bug 4): mostra
-    // "Conectando", nunca de volta o botão "Ver minha tela".
-    tile.append(buildConnecting(slot));
   } else if (slot !== null) {
     // O convite tem botão próprio, que para o clique antes de chegar no tile.
     if (!palco) tile.addEventListener('click', aoClicar);
@@ -477,25 +481,6 @@ function buildLoading() {
   return wrap;
 }
 
-/**
- * Espera pela assinatura (fix Bug 4): já pedi para assistir, mas o config ainda
- * não chegou para montar o decoder. Depois de 5s sem config, o texto explica o
- * que está acontecendo — sem cancelar a assinatura sozinho.
- */
-function buildConnecting(slot) {
-  const wrap = document.createElement('div');
-  wrap.className = 'watch-prompt connecting';
-  wrap.innerHTML = '<span class="spinner"></span>';
-  const msg = noConfigSlots.has(slot)
-    ? 'A transmissão foi anunciada, mas ainda não recebemos vídeo do transmissor.'
-    : 'Conectando à transmissão…';
-  const text = document.createElement('span');
-  text.className = 'watch-who';
-  text.textContent = msg;
-  wrap.append(text);
-  return wrap;
-}
-
 /** Quantas pessoas assistem esta tela; a lista aparece ao passar o mouse. */
 function buildWatchers(slot) {
   const people = available.get(slot)?.watchers ?? [];
@@ -533,6 +518,7 @@ function buildWatchers(slot) {
 
 /** Tela cinza com o convite para assistir — nada é baixado até clicar. */
 function buildWatchPrompt(slot, name, isMe) {
+  const camera = available.get(slot)?.fonte === 'camera';
   const wrap = document.createElement('div');
   wrap.className = 'watch-prompt';
 
@@ -540,7 +526,11 @@ function buildWatchPrompt(slot, name, isMe) {
   btn.className = 'btn go';
   btn.innerHTML =
     '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h18v11H3z"/><path d="M8 20h8"/></svg>';
-  btn.append(document.createTextNode(isMe ? 'Ver minha tela' : 'Assistir tela'));
+  btn.append(
+    document.createTextNode(
+      camera ? (isMe ? 'Ver minha câmera' : 'Assistir câmera') : isMe ? 'Ver minha tela' : 'Assistir tela'
+    )
+  );
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     watchSlot(slot);
@@ -550,7 +540,9 @@ function buildWatchPrompt(slot, name, isMe) {
   who.className = 'watch-who';
   // Ver a própria tela é conferência, não bisbilhotice: o texto precisa dizer
   // que o que está no ar é a sua, não a de outra pessoa com o seu nome.
-  who.textContent = isMe ? 'Sua transmissão está no ar' : `${name} está transmitindo`;
+  who.textContent = isMe
+    ? 'Sua transmissão está no ar'
+    : `${name} está ${camera ? 'com a câmera ligada' : 'transmitindo'}`;
 
   wrap.append(btn, who);
   return wrap;
@@ -783,28 +775,45 @@ function renderBar() {
   $('people').append(buildPeopleList());
 
   const casters = participants.filter((p) => p.broadcasting);
-  const iAmCasting = iAmBroadcasting();
+
+  const minhas = minhasFontes();
+  const telaNoAr = minhas.has('tela') || Boolean(myBroadcast);
+  const cameraNoAr = minhas.has('camera');
 
   const btn = $('share');
-  btn.classList.toggle('go', !iAmCasting);
-  btn.classList.toggle('live', iAmCasting);
+  btn.classList.toggle('go', !telaNoAr);
+  btn.classList.toggle('live', telaNoAr);
   btn.disabled = false;
 
-  const rotuloShare = iAmCasting ? 'Parar transmissão' : 'Compartilhar tela';
+  const rotuloShare = telaNoAr ? 'Parar tela' : 'Compartilhar tela';
   $('shareLabel').textContent = rotuloShare;
   btn.dataset.tip = rotuloShare;
   btn.setAttribute('aria-label', rotuloShare);
 
-  // A engrenagem só aparece para transmissão nascida aqui: a que roda na aba
-  // externa é configurada por lá, e daqui não dá para mexer nela.
-  $('liveSettings').hidden = !myBroadcast;
+  // A câmera tem botão próprio, com o mesmo par ligar/desligar da tela. Sem
+  // "go": duas ações em destaque na mesma barra disputariam a atenção, e a
+  // principal continua sendo a tela.
+  const cam = $('camera');
+  cam.classList.toggle('live', cameraNoAr);
+  const rotuloCam = cameraNoAr ? 'Desligar câmera' : 'Ligar câmera';
+  $('cameraLabel').textContent = rotuloCam;
+  cam.dataset.tip = rotuloCam;
+  cam.setAttribute('aria-label', rotuloCam);
+
+  // A engrenagem fica sempre à mão: parada ela edita o que valerá na próxima
+  // transmissão, e é o único lugar onde essas opções existem agora. Segue os
+  // botões principais para não sobrar sozinha na barra do lobby, onde não há
+  // transmissão nenhuma para configurar.
+  $('liveSettings').hidden = $('share').hidden;
   // Pediram som e ele foi barrado: a engrenagem pisca, porque é atrás dela que
   // está a saída. Sem isso o aviso passa no toast e ninguém acha o caminho.
   const somPendente = Boolean(myBroadcast?.somBloqueado?.());
   $('liveSettings').classList.toggle('atencao', somPendente);
   $('liveSettings').dataset.tip = somPendente
     ? 'Som barrado — clique para escolher a aba'
-    : 'Ajustes da transmissão';
+    : myBroadcast
+      ? 'Ajustes da transmissão'
+      : 'Configurações';
 
   // O controle de som só existe quando há som para controlar.
   const temSom = [...streams.values()].some((s) => s.audio);
@@ -832,7 +841,6 @@ function openStream(slot, userId) {
     player: createPlayer(canvas, {
       onError: (m) => toast(m, true),
       onTamanho: () => {
-        if (!s.started) console.debug('[viewer] first-frame-rendered', { slot });
         s.started = true;
         renderGrid();
       },
@@ -907,17 +915,8 @@ function ensureStatsTimer() {
     const s = streams.get(activeSlot) ?? streams.values().next().value;
     if (!s) return;
     $('pLag').textContent = `${Math.max(0, s.player.getLag())} ms`;
+    $('pFps').textContent = `${s.player.takeFrameCount()} fps`;
     $('pRes').textContent = s.player.getSizes().video;
-
-    // Telemetria real + feedback do viewer (Fase 1/7).
-    // UMA única amostragem por janela: `takeTelemetry` é quem lê e zera os
-    // contadores de rendered/decoded/received. Não chamar `takeFrameCount`
-    // separadamente no mesmo intervalo — isso zeraria o contador duas vezes e
-    // faria renderedFps reportar 0.
-    const t = s.player.takeTelemetry(1);
-    $('pFps').textContent = `${t.renderedFps} fps`;
-    renderViewerDetails(s, t);
-    sendViewerFeedback(t);
 
     // Quatro estados diferentes que, sem isto, parecem todos "sem som".
     if (!s.audio) $('pSom').textContent = 'a transmissão não tem áudio';
@@ -925,36 +924,6 @@ function ensureStatsTimer() {
     else if (volume === 0) $('pSom').textContent = 'silenciado aqui';
     else $('pSom').textContent = `tocando · ${Math.round(volume * 100)}%`;
   }, 1000);
-}
-
-/**
- * Fase 7 — manda feedback compacto do viewer ao servidor, que agrega e repassa
- * ao broadcaster. Enviado ~1x/s, nunca dezenas de mensagens por segundo.
- */
-function sendViewerFeedback(t) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const active = streams.get(activeSlot) ?? streams.values().next().value;
-  if (!active || t.renderedFps === 0 && t.receivedFps === 0) return;
-  ws.send(
-    JSON.stringify({
-      type: 'viewer-feedback',
-      slot: slotOf(active.userId),
-      telemetry: t,
-    })
-  );
-}
-
-/** Preenche o painel "Detalhes" do viewer com a telemetria real. */
-function renderViewerDetails(s, t) {
-  const panel = $('panel');
-  if (!panel) return;
-  const el = $('viewerDetails');
-  if (el) {
-    el.textContent =
-      `${s.player.getSizes().video} · R ${t.renderedFps}fps · D ${t.decodedFps}fps · ` +
-      `receb ${t.receivedFps}fps · Q ${t.decodeQueueSize} · drop ${t.droppedFrames} · ` +
-      `lat ${t.estimatedLatencyMs}ms (est.)`;
-  }
 }
 
 // ------------------------------------------------------------------- arranque
@@ -1153,6 +1122,7 @@ async function showLobby() {
   $('leaveRoom').hidden = true;
   $('roomSettings').hidden = true;
   $('share').hidden = true;
+  $('camera').hidden = true;
   $('liveSettings').hidden = true;
 
   // O dock inteiro sai de cena: todo controle dele é de dentro da sala, e o
@@ -1327,6 +1297,7 @@ function openRoom(tokens, room) {
   $('lobby').hidden = true;
   $('empty').hidden = false;
   $('share').hidden = false;
+  $('camera').hidden = false;
   $('people').hidden = false;
   $('settings').hidden = false;
   $('profile').hidden = false;
@@ -1552,11 +1523,7 @@ function connect() {
     // para qual decodificador — som e imagem dividem o mesmo canal.
     if (typeof e.data !== 'string') {
       const view = new DataView(e.data);
-      const slot = view.getUint8(0);
-      // Diagnóstico (fix Bug 5): o espectador precisa saber que o ponto de
-      // partida chegou — é o que faz o decoder sair do "conectando".
-      if (view.getUint8(1) === 1) console.debug('[viewer] keyframe-received', { slot });
-      const s = streams.get(slot);
+      const s = streams.get(view.getUint8(0));
       if (!s) return;
       if (view.getUint8(1) === 3) s.audio?.push(e.data);
       else s.player.push(e.data);
@@ -1567,6 +1534,9 @@ function connect() {
 
     if (msg.type === 'state') {
       participants = msg.participants ?? [];
+      abas.clear();
+      for (const uid of msg.abas ?? []) abas.add(uid);
+
       lastRoomState = msg.room ?? null;
 
       // A senha da sala só aparece para quem a criou.
@@ -1579,30 +1549,25 @@ function connect() {
       for (const s of msg.streams ?? []) {
         const info = available.get(s.slot) ?? { userId: s.userId, config: null };
         info.watchers = s.watchers ?? [];
+        // Servidor antigo não manda fonte; tela é o que sempre houve.
+        info.fonte = s.fonte ?? 'tela';
         available.set(s.slot, info);
       }
       for (const slot of [...available.keys()]) if (!live.has(slot)) available.delete(slot);
       for (const slot of [...streams.keys()]) if (!live.has(slot)) closeStream(slot);
-      for (const slot of [...watching]) {
-        if (!live.has(slot)) {
-          watching.delete(slot);
-          clearWatchTimer(slot);
-        }
-      }
+      for (const slot of [...watching]) if (!live.has(slot)) watching.delete(slot);
       renderGrid();
       renderBar();
     } else if (msg.type === 'stream-start') {
       // Só anuncia; ninguém assiste até pedir.
-      available.set(msg.slot, { userId: msg.userId, config: null });
+      available.set(msg.slot, { userId: msg.userId, fonte: msg.fonte ?? 'tela', config: null });
       watching.delete(msg.slot);
       closeStream(msg.slot);
       renderGrid();
     } else if (msg.type === 'config') {
       const info = available.get(msg.slot);
       if (info) info.config = msg.config;
-      console.debug('[viewer] config-received', { slot: msg.slot, codec: msg.config?.codec });
       if (watching.has(msg.slot)) {
-        clearWatchTimer(msg.slot);
         openStream(msg.slot, info?.userId ?? msg.slot);
         startStream(msg.slot, msg.config);
       }
@@ -1613,7 +1578,6 @@ function connect() {
     } else if (msg.type === 'stream-stop') {
       available.delete(msg.slot);
       watching.delete(msg.slot);
-      clearWatchTimer(msg.slot);
       endStream(msg.slot);
     } else if (msg.type === 'room-gone') {
       roomTokens = null;
@@ -1672,9 +1636,112 @@ function connect() {
  * myBroadcast entra no OU porque o `state` leva um instante para chegar, e sem
  * isso o botão pisca de volta para "Compartilhar" logo após começar.
  */
-function iAmBroadcasting() {
-  if (myBroadcast) return true;
-  return participants.some((p) => p.broadcasting && p.id === session?.user?.id);
+/** As fontes que eu estou transmitindo agora, segundo o servidor. */
+function minhasFontes() {
+  const meu = session?.user?.id;
+  if (!meu) return new Set();
+  return new Set(slotsOf(meu).map((slot) => available.get(slot)?.fonte ?? 'tela'));
+}
+
+/**
+ * Existe uma aba de captura minha conectada?
+ *
+ * Quem responde é o servidor, pela lista `abas` do estado. Antes isto era
+ * deduzido do que estava no ar, e errava justamente no caso que mais importa:
+ * a aba recém-aberta, ainda sem transmitir, ficava invisível — e um novo clique
+ * abria outra em cima dela.
+ */
+function abaAberta() {
+  return abas.has(session?.user?.id);
+}
+
+/**
+ * As opções da próxima transmissão, editadas pela engrenagem.
+ *
+ * Ficam no localStorage porque são preferência de quem transmite, não estado da
+ * sala: quem escolheu 5 Mb/s uma vez não quer reescolher a cada abertura. E
+ * ficam aqui, e não num modal que aparece antes de cada início, porque decidir
+ * qualidade toda vez que se quer mostrar a tela é atrito no caminho curto.
+ */
+const AJUSTES_PADRAO = { bitrate: 2500000, fps: 30, som: false };
+
+let ajustes = (() => {
+  try {
+    return { ...AJUSTES_PADRAO, ...JSON.parse(read('ajustes') ?? '{}') };
+  } catch {
+    return { ...AJUSTES_PADRAO };
+  }
+})();
+
+/** As opções no formato que a página de captura lê da URL. */
+function opcoesDaFonte(fonte) {
+  return {
+    q: String(ajustes.bitrate),
+    fps: String(ajustes.fps),
+    // Câmera vai sem som sempre: a voz já anda pela call.
+    som: fonte === 'camera' || !ajustes.som ? '0' : '1',
+  };
+}
+
+/**
+ * Liga uma fonte pelo caminho mais curto que existir para ela.
+ *
+ * Com uma aba já aberta, o pedido vai por ela em vez de abrir outra: seriam
+ * duas janelas para a pessoa manter vivas, e a que existe já faz as duas
+ * coisas. A aba resolve o que dá — câmera ela liga sozinha, tela precisa do
+ * clique lá, porque getDisplayMedia exige gesto do usuário.
+ */
+function ligarFonte(fonte) {
+  if (abaAberta()) {
+    // As opções vão no pedido: a aba pode estar aberta desde antes da última
+    // vez que a engrenagem foi mexida.
+    ws?.send(
+      JSON.stringify({ type: 'start-broadcast', fonte, opcoes: opcoesDaFonte(fonte) })
+    );
+    toast(
+      fonte === 'camera'
+        ? 'Pedi para a sua aba de transmissão ligar a câmera. Se ela pedir permissão, autorize por lá.'
+        : 'Sua aba de transmissão já está aberta — o clique para escolher a tela tem de ser lá.'
+    );
+    return;
+  }
+  abrirCaptura(fonte);
+}
+
+/**
+ * Abre a captura, aqui dentro se der e na aba se não der.
+ *
+ * Sem modal no meio: as opções já foram decididas na engrenagem, e perguntar de
+ * novo a cada início era o passo que sobrava entre querer mostrar a tela e
+ * mostrá-la.
+ */
+async function abrirCaptura(fonte) {
+  if (!roomTokens) return;
+
+  // Só a tela tem chance de nascer aqui dentro; o Discord anula o getUserMedia
+  // no iframe, então a câmera vai direto para a aba.
+  if (fonte === 'tela' && (await broadcastFromHere())) return;
+
+  const url = new URL(roomTokens.shareUrl);
+  for (const [chave, valor] of Object.entries(opcoesDaFonte(fonte))) {
+    url.searchParams.set(chave, valor);
+  }
+  url.searchParams.set('fonte', fonte);
+
+  if (inDiscord) {
+    try {
+      const res = await sdk.commands.openExternalLink({ url: url.toString() });
+      // Clientes antigos devolvem null; só tratamos false como recusa explícita.
+      if (res?.opened === false) {
+        toast('Você recusou abrir o link. Sem isso não dá para capturar a tela.', true);
+      }
+    } catch (err) {
+      toast(`Não foi possível abrir o link: ${err.message}`, true);
+    }
+    return;
+  }
+
+  window.open(url.toString(), '_blank');
 }
 
 /**
@@ -1685,41 +1752,61 @@ function iAmBroadcasting() {
  * vazamento de tela, não detalhe de interface — e a aba externa tem conexão
  * própria, então só o servidor consegue mandá-la parar.
  */
-function stopMyBroadcast() {
-  myBroadcast?.stop();
-  myBroadcast = null;
+function stopMyBroadcast(fonte = null) {
+  // O myBroadcast é sempre a tela: é a única fonte que a atividade consegue
+  // capturar por conta própria.
+  if (!fonte || fonte === 'tela') {
+    myBroadcast?.stop();
+    myBroadcast = null;
+  }
   if (participants.some((p) => p.broadcasting && p.id === session?.user?.id)) {
-    ws?.send(JSON.stringify({ type: 'stop-broadcast' }));
+    // Sem fonte o servidor derruba tudo — que é o certo para sair da sala.
+    ws?.send(JSON.stringify({ type: 'stop-broadcast', ...(fonte ? { fonte } : {}) }));
   }
 }
 
 $('share').addEventListener('click', () => {
   if (!session) return;
 
-  if (iAmBroadcasting()) {
-    stopMyBroadcast();
+  if (minhasFontes().has('tela') || myBroadcast) {
+    stopMyBroadcast('tela');
     renderBar();
     return;
   }
 
-  openModal('start');
+  ligarFonte('tela');
+});
+
+$('camera').addEventListener('click', () => {
+  if (!session) return;
+
+  if (minhasFontes().has('camera')) {
+    stopMyBroadcast('camera');
+    renderBar();
+    return;
+  }
+
+  ligarFonte('camera');
 });
 
 /**
- * O mesmo modal serve para começar e para ajustar no ar. Em 'live' os campos
- * já vêm com os valores atuais e o botão aplica em vez de iniciar.
+ * O mesmo modal serve para configurar antes e para ajustar no ar.
+ *
+ * Em 'config' ele edita os padrões guardados e o botão salva; em 'live' vem com
+ * os valores da transmissão em curso e o botão aplica na hora. Começar deixou
+ * de passar por aqui: os botões da barra iniciam direto com o que está salvo.
  */
-let modalMode = 'start';
+let modalMode = 'config';
 
 function openModal(mode) {
   modalMode = mode;
   const live = mode === 'live';
 
-  $('modalTitle').textContent = live ? 'Ajustes da transmissão' : 'Compartilhar sua tela';
+  $('modalTitle').textContent = live ? 'Ajustes da transmissão' : 'Configurações';
   $('modalSub').textContent = live
     ? 'Vale na hora, sem derrubar quem está assistindo.'
-    : 'Escolha a tela e comece a transmitir.';
-  $('modalGo').textContent = live ? 'Aplicar' : 'Compartilhar tela';
+    : 'Valem para a próxima vez que você começar a transmitir.';
+  $('modalGo').textContent = live ? 'Aplicar' : 'Salvar';
   $('modalSwap').hidden = !live;
   $('modalNote').hidden = live;
 
@@ -1732,12 +1819,18 @@ function openModal(mode) {
     const s = myBroadcast.getSettings();
     $('mQuality').value = String(s.bitrate);
     $('mFps').value = String(s.fps);
+  } else {
+    $('mQuality').value = String(ajustes.bitrate);
+    $('mFps').value = String(ajustes.fps);
+    $('mAudio').checked = ajustes.som;
   }
 
   $('modal').hidden = false;
 }
 
-$('liveSettings').addEventListener('click', () => openModal('live'));
+// Com algo no ar a engrenagem ajusta aquela transmissão; parada, ela edita o
+// que valerá na próxima.
+$('liveSettings').addEventListener('click', () => openModal(myBroadcast ? 'live' : 'config'));
 
 /** Espelha o volume atual no botão e no cursor, sem tocar no áudio. */
 function renderVolume() {
@@ -1818,10 +1911,9 @@ async function broadcastFromHere() {
 
   const b = createBroadcaster({
     wsUrl: `${proto}://${location.host}${P}/ws?t=${encodeURIComponent(shareToken)}`,
-    bitrate: Number($('mQuality').value),
-    fps: Number($('mFps').value),
-    audio: $('mAudio').checked,
-    mode: $('mMode')?.value ?? 'auto',
+    bitrate: ajustes.bitrate,
+    fps: ajustes.fps,
+    audio: ajustes.som,
     onAviso: (m) => toast(m, true),
     onEnd: () => {
       myBroadcast = null;
@@ -1833,12 +1925,10 @@ async function broadcastFromHere() {
   try {
     await b.start();
     myBroadcast = b;
-    console.debug('[activity] broadcast-ready', { phase: b.getPhase() });
     closeModal();
     renderBar();
     return true;
   } catch (err) {
-    console.debug('[activity] broadcast-failed', { name: err?.name, message: err?.message });
     const showedPicker = performance.now() - startedAt > 250;
     if (err.name === 'NotAllowedError' && showedPicker) {
       closeModal();
@@ -1855,7 +1945,7 @@ $('modal').addEventListener('click', (e) => {
   if (e.target === $('modal')) closeModal();
 });
 
-$('modalGo').addEventListener('click', async () => {
+$('modalGo').addEventListener('click', () => {
   // Ajuste no ar: aplica e fecha, sem tocar na captura.
   if (modalMode === 'live') {
     myBroadcast?.setQuality({
@@ -1866,36 +1956,18 @@ $('modalGo').addEventListener('click', async () => {
     return;
   }
 
-  // O clique é o gesto de usuário que getDisplayMedia exige, então é aqui que
-  // dá para transmitir sem sair do Discord. A aba externa só entra se o iframe
-  // não tiver permissão de captura.
-  if (await broadcastFromHere()) return;
+  ajustes = {
+    bitrate: Number($('mQuality').value),
+    fps: Number($('mFps').value),
+    som: $('mAudio').checked,
+  };
+  store('ajustes', JSON.stringify(ajustes));
+
+  // A aba precisa saber na hora: ela mostra estas opções e usa a qualidade no
+  // que já está no ar. Sem isto o resumo dela envelhecia em silêncio.
+  ws?.send(JSON.stringify({ type: 'config-broadcast', opcoes: opcoesDaFonte('tela') }));
 
   closeModal();
-
-  // As opções seguem na URL: a página de captura já abre configurada, sem
-  // pedir as mesmas escolhas de novo.
-  const url = new URL(roomTokens.shareUrl);
-  url.searchParams.set('q', $('mQuality').value);
-  url.searchParams.set('fps', $('mFps').value);
-  url.searchParams.set('som', $('mAudio').checked ? '1' : '0');
-  url.searchParams.set('modo', $('mMode')?.value ?? 'auto');
-
-  if (inDiscord) {
-    try {
-      const res = await sdk.commands.openExternalLink({ url: url.toString() });
-      // Clientes antigos devolvem null; só tratamos false como recusa explícita.
-      if (res?.opened === false) {
-        toast('Você recusou abrir o link. Sem isso não dá para capturar a tela.', true);
-        return;
-      }
-    } catch (err) {
-      toast(`Não foi possível abrir o link: ${err.message}`, true);
-      return;
-    }
-  } else {
-    window.open(url.toString(), '_blank');
-  }
 });
 
 // ------------------------------------------------------- modais das salas

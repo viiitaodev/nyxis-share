@@ -3,112 +3,90 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Compartilhar tela</title>
+    <title>Transmitir</title>
     <!-- ?v= existe porque share.js/css têm nome fixo. Quem abriu a página antes
          dos cabeçalhos no-store guardou a versão antiga por heurística do
          navegador, e continuaria usando ela para sempre. Trocar a query força
          uma URL nova. Incremente ao publicar mudanças nesses arquivos. -->
-    <link rel="stylesheet" href="/share.css?v=12" />
+    <link rel="stylesheet" href="/share.css?v=14" />
   </head>
   <body>
     <main class="card">
       <header>
-        <h1>Nyxis Share</h1>
+        <h1>Transmitir</h1>
         <p class="sub" id="roomLine">Carregando…</p>
       </header>
 
+      <!-- Erro que impede a página inteira: token inválido, navegador sem
+           suporte. Os erros de cada fonte ficam no bloco dela. -->
+      <p id="pageStatus" class="status" role="status"></p>
+
+      <!-- Só o resumo: qualidade, taxa e som são editados pela engrenagem da
+           atividade, que é de onde esta página é aberta. Os mesmos controles
+           nos dois lugares criavam duas fontes de verdade, e a daqui
+           envelhecia assim que alguém mexia na de lá. -->
       <section id="setup">
-        <div class="row">
-          <label for="mode">Modo</label>
-          <select id="mode">
-            <option value="auto" selected>Automático</option>
-            <option value="motion">Jogos / Movimento</option>
-            <option value="game">Jogos (captura)</option>
-            <option value="text">Texto / Trabalho</option>
-          </select>
-        </div>
-
-        <div class="row">
-          <label for="quality">Qualidade</label>
-          <select id="quality">
-            <option value="2500000">Boa — 2,5 Mbps</option>
-            <option value="5000000">Alta — 5 Mbps</option>
-            <option value="8000000" selected>Máxima — 8 Mbps</option>
-          </select>
-        </div>
-
-        <div class="row">
-          <label for="fps">Taxa de quadros</label>
-          <select id="fps">
-            <option value="30">30 fps</option>
-            <option value="60" selected>60 fps</option>
-          </select>
-        </div>
-
-        <div class="row">
-          <label for="outRes">Resolução de saída</label>
-          <select id="outRes">
-            <option value="original" selected>Original (da fonte)</option>
-            <option value="1080">1080p</option>
-            <option value="900">900p</option>
-            <option value="720">720p</option>
-          </select>
-        </div>
-
-        <p id="presetLine" class="preset" hidden></p>
-        <p id="presetHint" class="note" hidden>
-          Você veio da atividade do Discord — a configuração já está pronta.
-          Escolha o que compartilhar e volte para a atividade para assistir.
-        </p>
-
-        <label class="check">
-          <input id="withAudio" type="checkbox" />
-          <span>Compartilhar o som do computador</span>
-        </label>
-
-        <p class="note">
-          Marque também "Compartilhar o áudio" na janela que o navegador abrir — sem isso
-          ele entrega a tela sem som. Em jogos, escolher a <strong>janela</strong> do jogo
-          (em vez da tela inteira) costuma dar melhor FPS de captura.
-        </p>
-
-        <button id="start" class="primary">Escolher o que compartilhar</button>
+        <p id="presetLine" class="preset"></p>
       </section>
 
-      <section id="live" hidden>
-        <div class="live-badge"><span class="dot"></span> No ar</div>
-        <p class="live-hint">Pode voltar para o Discord — a transmissão continua.</p>
-        <video id="preview" muted playsinline></video>
-        <div class="stats">
-          <div><strong id="viewers">0</strong><span>assistindo</span></div>
-          <div><strong id="fpsOut">—</strong><span>quadros</span></div>
-          <div><strong id="bitrate">—</strong><span>enviando</span></div>
-          <div><strong id="elapsed">00:00</strong><span>no ar</span></div>
-        </div>
+      <div class="fontes">
+        <section class="bloco" id="bloco-tela">
+          <h2>Tela</h2>
 
-        <p id="phaseLine" class="phase" role="status"></p>
+          <div id="tela-setup">
+            <p class="note" id="tela-nota"></p>
 
-        <label class="check preview-toggle">
-          <input id="previewOn" type="checkbox" checked />
-          <span>Preview local</span>
-        </label>
+            <button id="tela-start" class="primary">Escolher tela e transmitir</button>
+          </div>
 
-        <details id="details" class="details">
-          <summary>Diagnóstico avançado</summary>
-          <dl id="detailList"></dl>
-        </details>
+          <div id="tela-live" hidden>
+            <div class="live-badge"><span class="dot"></span> No ar</div>
+            <video id="tela-preview" muted playsinline></video>
+            <div class="stats">
+              <div><strong id="tela-viewers">0</strong><span>assistindo</span></div>
+              <div><strong id="tela-fps">—</strong><span>quadros</span></div>
+              <div><strong id="tela-bitrate">—</strong><span>enviando</span></div>
+              <div><strong id="tela-elapsed">00:00</strong><span>no ar</span></div>
+            </div>
+            <button id="somAba" class="secondary" hidden>Som de uma aba</button>
+            <button id="tela-stop" class="danger">Parar de transmitir a tela</button>
+          </div>
 
-        <button id="somAba" class="secondary" hidden>Som de uma aba</button>
-        <button id="stop" class="danger">Parar de transmitir</button>
-      </section>
+          <p id="tela-status" class="status" role="status"></p>
+        </section>
 
-      <p id="status" class="status" role="status"></p>
+        <section class="bloco" id="bloco-camera">
+          <h2>Câmera</h2>
+
+          <div id="camera-setup">
+            <p class="note">
+              A câmera vai sem som — sua voz continua indo pela call do Discord.
+            </p>
+
+            <button id="camera-start" class="primary">Ligar a câmera</button>
+          </div>
+
+          <div id="camera-live" hidden>
+            <div class="live-badge"><span class="dot"></span> No ar</div>
+            <video id="camera-preview" muted playsinline></video>
+            <div class="stats">
+              <div><strong id="camera-viewers">0</strong><span>assistindo</span></div>
+              <div><strong id="camera-fps">—</strong><span>quadros</span></div>
+              <div><strong id="camera-bitrate">—</strong><span>enviando</span></div>
+              <div><strong id="camera-elapsed">00:00</strong><span>no ar</span></div>
+            </div>
+            <button id="camera-stop" class="danger">Desligar a câmera</button>
+          </div>
+
+          <p id="camera-status" class="status" role="status"></p>
+        </section>
+      </div>
 
       <footer>
-        <p>Mantenha esta aba aberta enquanto transmite. O vídeo aparece na atividade do Discord.</p>
+        <p>Mantenha esta aba aberta enquanto transmite. Você pode voltar para o Discord — a transmissão continua.</p>
       </footer>
     </main>
 
-    <script type="module" src="/share.js?v=13"></script>
+    <script type="module" src="/share.js?v=14"></script>
   </body>
 </html>
