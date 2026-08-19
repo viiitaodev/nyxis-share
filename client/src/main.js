@@ -239,6 +239,7 @@ function renderGrid() {
   // da lista de salas.
   if (!inRoom()) {
     $('app').classList.remove('controles-na-lateral');
+    $('app').classList.remove('controles-no-canto');
     grid.hidden = true;
     $('empty').hidden = true;
     $('fullscreen').hidden = true;
@@ -281,7 +282,8 @@ function renderGrid() {
   grid.classList.toggle('cheia', noPalco && telaCheia);
   // A lateral é reconstruída a cada atualização da sala. Os controles ficam
   // no DOM principal e só mudam de lugar por CSS, para não perder eventos.
-  $('app').classList.toggle('controles-na-lateral', noPalco && !telaCheia);
+  $('app').classList.toggle('controles-na-lateral', noPalco);
+  $('app').classList.toggle('controles-no-canto', noPalco && telaCheia);
 
   // Com a lateral no ar, a contagem no topo repete o que está logo ali — e
   // custa uma faixa inteira de altura, que é o que falta para a tela. Vazia, a
@@ -1694,11 +1696,17 @@ function abaAberta() {
  * ficam aqui, e não num modal que aparece antes de cada início, porque decidir
  * qualidade toda vez que se quer mostrar a tela é atrito no caminho curto.
  */
-const AJUSTES_PADRAO = { bitrate: 2500000, fps: 30, som: false };
+const AJUSTES_PADRAO = { bitrate: 2500000, fps: 30, codec: 'auto', som: false };
+const CODECS_DISPONIVEIS = new Set(['auto', 'h264', 'vp8', 'vp9']);
 
 let ajustes = (() => {
   try {
-    return { ...AJUSTES_PADRAO, ...JSON.parse(read('ajustes') ?? '{}') };
+    const salvos = JSON.parse(read('ajustes') ?? '{}');
+    return {
+      ...AJUSTES_PADRAO,
+      ...salvos,
+      codec: CODECS_DISPONIVEIS.has(salvos.codec) ? salvos.codec : 'auto',
+    };
   } catch {
     return { ...AJUSTES_PADRAO };
   }
@@ -1709,6 +1717,7 @@ function opcoesDaFonte(fonte) {
   return {
     q: String(ajustes.bitrate),
     fps: String(ajustes.fps),
+    codec: ajustes.codec,
     // Câmera vai sem som sempre: a voz já anda pela call.
     som: fonte === 'camera' || !ajustes.som ? '0' : '1',
   };
@@ -1850,9 +1859,13 @@ function openModal(mode) {
     const s = myBroadcast.getSettings();
     $('mQuality').value = String(s.bitrate);
     $('mFps').value = String(s.fps);
+    $('mCodec').value = ajustes.codec;
+    $('mCodec').disabled = true;
   } else {
     $('mQuality').value = String(ajustes.bitrate);
     $('mFps').value = String(ajustes.fps);
+    $('mCodec').value = ajustes.codec;
+    $('mCodec').disabled = false;
     $('mAudio').checked = ajustes.som;
   }
 
@@ -1944,6 +1957,7 @@ async function broadcastFromHere() {
     wsUrl: `${proto}://${location.host}${P}/ws?t=${encodeURIComponent(shareToken)}`,
     bitrate: ajustes.bitrate,
     fps: ajustes.fps,
+    codec: ajustes.codec,
     audio: ajustes.som,
     onAviso: (m) => toast(m, true),
     onEnd: () => {
@@ -1990,6 +2004,7 @@ $('modalGo').addEventListener('click', () => {
   ajustes = {
     bitrate: Number($('mQuality').value),
     fps: Number($('mFps').value),
+    codec: $('mCodec').value,
     som: $('mAudio').checked,
   };
   store('ajustes', JSON.stringify(ajustes));

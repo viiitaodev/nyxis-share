@@ -19,6 +19,21 @@ const CANDIDATES = [
   { codec: 'vp09.00.10.08' },
 ];
 
+const CODECS = new Set(['auto', 'h264', 'vp8', 'vp9']);
+
+function candidatesFor(codec) {
+  switch (codec) {
+    case 'h264':
+      return CANDIDATES.filter((c) => c.codec.startsWith('avc1'));
+    case 'vp8':
+      return CANDIDATES.filter((c) => c.codec === 'vp8');
+    case 'vp9':
+      return CANDIDATES.filter((c) => c.codec.startsWith('vp09'));
+    default:
+      return CANDIDATES;
+  }
+}
+
 // Keyframe periódico: seguro barato para quem reconecta fora do fluxo normal.
 const KEYFRAME_EVERY_MS = 3000;
 
@@ -71,6 +86,7 @@ export function supportError({ requireChromium = false, fonte = 'tela' } = {}) {
  * @param {string} opts.wsUrl        endpoint do relay, com o token de transmissor
  * @param {number} opts.bitrate      bits por segundo
  * @param {number} opts.fps
+ * @param {'auto'|'h264'|'vp8'|'vp9'} [opts.codec] codec a priorizar
  * @param {boolean} [opts.audio]     capturar também o som do computador
  * @param {'tela'|'camera'} [opts.fonte]  de onde vem o vídeo
  * @param {(info:object)=>void} [opts.onStatus]  codec/resolução/caminho de captura
@@ -83,6 +99,7 @@ export function createBroadcaster({
   wsUrl,
   bitrate,
   fps,
+  codec = 'auto',
   audio = false,
   fonte = 'tela',
   onStatus,
@@ -105,6 +122,7 @@ export function createBroadcaster({
   // A configuração que o decoder remoto realmente precisa. É diferente da
   // configuração do encoder: vem nos metadados do primeiro quadro codificado.
   let decoderConfig = null;
+  const codecPreferido = CODECS.has(codec) ? codec : 'auto';
   let stage = null;
   let stageCtx = null;
 
@@ -142,7 +160,11 @@ export function createBroadcaster({
     config = await pickConfig(target.width, target.height);
     if (!config) {
       cleanup();
-      throw new Error('Nenhum codec de vídeo suportado por este navegador.');
+      throw new Error(
+        codecPreferido === 'auto'
+          ? 'Nenhum codec de vídeo suportado por este navegador.'
+          : `O codec ${codecPreferido.toUpperCase()} não é suportado nesta configuração. Escolha Automático ou outro codec.`
+      );
     }
 
     await connect();
@@ -413,7 +435,7 @@ export function createBroadcaster({
     // Duas passadas: navegadores que não conhecem `latencyMode` podem recusar a
     // configuração inteira por causa dela. Mais latência é melhor que nada.
     for (const realtime of [true, false]) {
-      for (const candidate of CANDIDATES) {
+      for (const candidate of candidatesFor(codecPreferido)) {
         const cfg = { ...candidate, width, height, bitrate, framerate: fps };
         if (realtime) cfg.latencyMode = 'realtime';
         try {

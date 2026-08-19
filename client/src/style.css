@@ -111,7 +111,9 @@ body {
    visível — sair por tecla é atalho, não é caminho. */
 .grid.palco.cheia {
   grid-template-columns: minmax(0, 1fr);
-  padding: 0;
+  /* Reserva uma faixa mínima para os controles flutuantes no canto, sem
+     colocá-los sobre o vídeo. */
+  padding: 0 16px 72px;
 }
 
 .grid.palco.cheia .tile {
@@ -225,8 +227,8 @@ body {
   display: flex;
   position: absolute;
   z-index: 2;
-  right: 16px;
-  bottom: 16px;
+  right: 12px;
+  bottom: 12px;
   width: var(--strip, 300px);
   padding: 10px 0 0;
   align-items: stretch;
@@ -239,8 +241,8 @@ body {
 
 #app.controles-na-lateral > .bottombar .dock {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
 }
 
 #app.controles-na-lateral > .bottombar .group {
@@ -249,15 +251,51 @@ body {
 
 #app.controles-na-lateral > .bottombar .btn {
   min-width: 0;
+  height: 38px;
+  padding: 0 8px;
   justify-content: center;
 }
 
 #app.controles-na-lateral > .bottombar .btn.wide {
-  grid-column: span 2;
+  grid-column: auto;
+}
+
+#app.controles-na-lateral #shareLabel,
+#app.controles-na-lateral #cameraLabel {
+  display: none;
 }
 
 #app.controles-na-lateral > .bottombar .panel {
   width: 100%;
+}
+
+/* Em tela cheia não há coluna lateral. Os mesmos controles viram uma fileira
+   compacta no canto direito, e a reserva no grid impede que cubram o vídeo. */
+#app.controles-no-canto > .bottombar {
+  width: auto;
+  padding: 0;
+  border-top: 0;
+  align-items: flex-end;
+}
+
+#app.controles-no-canto > .bottombar .dock,
+#app.controles-no-canto > .bottombar .group {
+  display: flex;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+}
+
+#app.controles-no-canto > .bottombar .btn {
+  width: 38px;
+  min-width: 38px;
+}
+
+#app.controles-no-canto > .bottombar .panel {
+  position: absolute;
+  right: 0;
+  bottom: 46px;
+  width: 240px;
 }
 
 .divider {
