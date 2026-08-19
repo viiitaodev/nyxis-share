@@ -282,6 +282,8 @@ function renderGrid() {
   grid.replaceChildren();
 
   if (!noPalco) {
+    // Sem lateral, a barra continua no rodapé normal da Activity.
+    $('app').append($('bottombar'));
     const entradas = entradasDoGrid();
     grid.style.setProperty('--cols', columnsFor(entradas.length));
     grid.append(...entradas.map((e) => buildTile(e.p, { slot: e.slot }).el));
@@ -299,7 +301,11 @@ function renderGrid() {
   // mostrando — e um dos dois fica preto, conforme a ordem do desenho.
   grid.append(buildTile(emCena, { palco: true, slot: activeSlot }).el);
 
-  if (telaCheia) return;
+  if (telaCheia) {
+    // Tela cheia não tem lateral; não esconda a saída e os controles.
+    $('app').append($('bottombar'));
+    return;
+  }
 
   applyStrip();
   grid.append(divider, buildSidebar());
@@ -347,6 +353,11 @@ function buildSidebar() {
     gente.append(buildTile(p, { semVideo: true }).el);
   }
   barra.append(gente);
+
+  // No palco a lateral já concentra o contexto da call. Colocar os controles
+  // abaixo das pessoas libera toda a altura que a barra inferior consumia e
+  // deixa a composição próxima da call nativa do Discord.
+  barra.append($('bottombar'));
 
   return barra;
 }
