@@ -1,13 +1,23 @@
 /**
- * Pipeline de transmissão: captura → codifica → envia.
+ * Pipeline de transmissão INLINE (main thread): captura → codifica → envia.
  *
- * Módulo compartilhado entre a Activity (captura dentro do modal, quando o
- * Discord permite) e a página de captura externa (quando não permite). Uma
- * implementação só — duas cópias divergiriam na primeira correção.
+ * Esta é a implementação de FALLBACK. Quando o navegador não consegue transferir
+ * o MediaStreamTrack para um DedicatedWorker (ou o worker não sobe), o pipeline
+ * roda aqui, na main thread — o comportamento histórico. A versão preferida vive
+ * em /shared/broadcast-worker.mjs (DedicatedWorker) e é escolhida por
+ * /shared/broadcaster.js quando suportada.
  *
  * Sem WebRTC porque a Activity não tem, e sem MediaRecorder porque o container
  * impõe piso de latência. WebCodecs codifica quadro a quadro e envia direto.
  */
+import { contentHintFor } from './broadcast-mode.mjs';
+import { createAdaptiveController } from './adaptive.mjs';
+import { identifyBottleneck } from './bottleneck.mjs';
+import { PHASES } from './lifecycle.mjs';
+
+// Quanto tempo a pipeline inline pode levar até produzir o primeiro chunk
+// codificado (stream-ready). Depois disso é erro real, não espera.
+const STREAM_READY_TIMEOUT_MS = 15_000;
 
 // H264 costuma ter encoder por hardware; VP8 quase sempre cai em software, que
 // a 1080p derruba o framerate. Por isso as duas variantes de H264 vêm antes:
@@ -18,21 +28,6 @@ const CANDIDATES = [
   { codec: 'vp8' },
   { codec: 'vp09.00.10.08' },
 ];
-
-const CODECS = new Set(['auto', 'h264', 'vp8', 'vp9']);
-
-function candidatesFor(codec) {
-  switch (codec) {
-    case 'h264':
-      return CANDIDATES.filter((c) => c.codec.startsWith('avc1'));
-    case 'vp8':
-      return CANDIDATES.filter((c) => c.codec === 'vp8');
-    case 'vp9':
-      return CANDIDATES.filter((c) => c.codec.startsWith('vp09'));
-    default:
-      return CANDIDATES;
-  }
-}
 
 // Keyframe periódico: seguro barato para quem reconecta fora do fluxo normal.
 const KEYFRAME_EVERY_MS = 3000;
@@ -53,21 +48,24 @@ const AUDIO_BITRATE = 96_000;
 const MAX_W = 1920;
 const MAX_H = 1080;
 
+// Política de fila do encoder (Fase 5): >= 3 significa atraso acumulado.
+const DROP_QUEUE_THRESHOLD = 3;
+// Piso do bitrate no adaptive (Fase 6): não vale a pena mandar vídeo inútil.
+const MIN_BITRATE = 500_000;
+
+// Diagnóstico de probing de codec: só em modo debug (nunca spam ao usuário).
+const DEBUG_PROBING = typeof process !== 'undefined' && process.env?.DEBUG_PROBING === '1';
+
 const even = (n) => Math.max(2, n - (n % 2));
 
-function fitWithin(w, h) {
-  const scale = Math.min(1, MAX_W / w, MAX_H / h);
+function fitWithin(w, h, limitH = MAX_H) {
+  const scale = Math.min(1, MAX_W / w, limitH / h);
   return { width: even(Math.round(w * scale)), height: even(Math.round(h * scale)) };
 }
 
 /** Motivo pelo qual este navegador não consegue transmitir, ou null. */
-export function supportError({ requireChromium = false, fonte = 'tela' } = {}) {
-  const camera = fonte === 'camera';
-
-  if (camera && !navigator.mediaDevices?.getUserMedia) {
-    return 'Este navegador não permite acesso à câmera.';
-  }
-  if (!camera && !navigator.mediaDevices?.getDisplayMedia) {
+export function supportError({ requireChromium = false } = {}) {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
     return 'Este navegador não permite captura de tela. Navegador de celular não suporta captura — use um desktop.';
   }
   if (!window.VideoEncoder || !window.VideoFrame || !window.EncodedVideoChunk) {
@@ -86,30 +84,36 @@ export function supportError({ requireChromium = false, fonte = 'tela' } = {}) {
  * @param {string} opts.wsUrl        endpoint do relay, com o token de transmissor
  * @param {number} opts.bitrate      bits por segundo
  * @param {number} opts.fps
- * @param {'auto'|'h264'|'vp8'|'vp9'} [opts.codec] codec a priorizar
  * @param {boolean} [opts.audio]     capturar também o som do computador
- * @param {'tela'|'camera'} [opts.fonte]  de onde vem o vídeo
+ * @param {string} [opts.mode]       'auto' | 'motion' | 'text' — modo de conteúdo
+ * @param {string} [opts.contentHint] força o contentHint ('motion'|'text'); ignora mode
  * @param {(info:object)=>void} [opts.onStatus]  codec/resolução/caminho de captura
  * @param {(stats:object)=>void} [opts.onStats]  viewers, fps, mbps, segundos no ar
  * @param {(reason:string)=>void} [opts.onEnd]   encerrou (por qualquer motivo)
  * @param {(msg:string)=>void} [opts.onAviso]    algo mudou sem ser erro
  * @param {(msg:string)=>void} [opts.onError]
+ * @param {(phase:string)=>void} [opts.onPhase]  ciclo de vida da transmissão
+ * @param {MediaStream} [opts.stream]            stream já adquirido pela fachada
  */
-export function createBroadcaster({
+export function createInlineBroadcaster({
   wsUrl,
   bitrate,
   fps,
-  codec = 'auto',
   audio = false,
-  fonte = 'tela',
+  mode = 'auto',
+  contentHint = null,
   onStatus,
   onStats,
   onEnd,
   onError,
   onAviso,
+  onPhase,
+  // Stream já adquirido pela fachada (fallback do worker). Quando presente, o
+  // inline NÃO re-pede a tela — reutiliza o que já foi escolhido pelo usuário.
+  stream: fornecido = null,
 }) {
   let ws = null;
-  let stream = null;
+  let stream = fornecido;
   let encoder = null;
   let reader = null;
   let audioEncoder = null;
@@ -119,12 +123,16 @@ export function createBroadcaster({
   let somBloqueado = false;
   let video = null;
   let config = null;
-  // A configuração que o decoder remoto realmente precisa. É diferente da
-  // configuração do encoder: vem nos metadados do primeiro quadro codificado.
-  let decoderConfig = null;
-  const codecPreferido = CODECS.has(codec) ? codec : 'auto';
   let stage = null;
   let stageCtx = null;
+  // O servidor só recebe 'start' quando a pipeline já produz mídia (fix Bug 3).
+  let serverStarted = false;
+  let firstFrameSubmitted = false;
+  let readyResolve = null;
+  let currentPhase = null;
+
+  // contentHint efetivo, decidido pelo modo quando não foi forçado.
+  const hint = contentHint || contentHintFor(mode);
 
   let running = false;
   let mySlot = 0;
@@ -138,44 +146,126 @@ export function createBroadcaster({
   let viewers = 0;
   let statsTimer = null;
 
+  // Configuração de telemetria (sem contadores — esses vivem em `tel`).
+  let t = {
+    capturePath: null, // 'direct' | 'video'
+    transport: 'WebSocket',
+    hardwareAcceleration: 'requested',
+    probing: [], // resultado de cada variante testada no pickConfig
+    probingSummary: null,
+    // Diagnóstico de captura (fonte real e contexto de GPU/browser).
+    displaySurface: null, // 'monitor' | 'window' | 'browser'
+    trackReportedFps: null,
+    captureWidth: null,
+    captureHeight: null,
+    contentHintReal: null,
+    documentVisibility: null,
+    previewActive: false,
+    workerPipeline: false,
+    captureFrameIntervalMs: null,
+  };
+  let lastTelemetry = null;
+  let feedback = null; // resumo do viewer (Fase 7)
+
+  // Contadores acumulados desde o início da janela de telemetria. O FPS é
+  // calculado por delta de tempo real (frames / dt), nunca assumindo 1s.
+  let tel = { captured: 0, submitted: 0, encoded: 0, dropped: 0, keyframes: 0 };
+  let windowStartAt = 0;
+  let lastStatus = null;
+
+  // AdaptiveQualityController (Bug 4): degrada rápido, recupera devagar,
+  // nunca passa do bitrate escolhido pelo usuário/perfil.
+  const adaptive = createAdaptiveController({
+    initialBitrate: bitrate,
+    onApply: applyBitrate,
+    onChange: (msg) => onAviso?.(msg),
+  });
+
+  /** Emite fase e guarda para getPhase(). */
+  function emitPhase(phase) {
+    currentPhase = phase;
+    onPhase?.(phase);
+  }
+
+  /**
+   * Estrutura de status SEMPRE consistente (Bug 5). Chamada no start() e em
+   * syncSize() — nunca duplicar estruturas que divergem.
+   */
+  function emitStatus() {
+    const status = {
+      codec: config?.codec,
+      width: config?.width,
+      height: config?.height,
+      direct: t.capturePath === 'direct',
+      mode,
+      hint: hint ?? 'none',
+      hintReal: t.contentHintReal ?? 'none',
+      hardwareAcceleration: t.hardwareAcceleration ?? 'requested',
+      transport: t.transport,
+      displaySurface: t.displaySurface,
+      trackReportedFps: t.trackReportedFps,
+      documentVisibility: t.documentVisibility,
+      previewActive: t.previewActive,
+      workerPipeline: t.workerPipeline,
+    };
+    lastStatus = status;
+    onStatus?.(status);
+  }
+
   async function start() {
+    emitPhase(PHASES.INITIALIZING);
     // Precisa vir do gesto do usuário; qualquer await antes disso o invalida.
-    stream = fonte === 'camera' ? await capturarCamera() : await capturarTela();
+    // Quando a fachada já adquiriu o stream (fallback do worker), reutiliza-o
+    // sem abrir o seletor de novo.
+    if (!stream) {
+      emitPhase(PHASES.AWAITING_PICKER);
+      stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: fps, max: fps } },
+      // systemAudio: 'include' pede o som do computador em vez de só o da aba.
+      // Os tratamentos de voz ficam desligados: eles existem para microfone e,
+      // em som de aplicativo, cortam justamente o que se queria ouvir.
+      audio: audio ? audioConstraints() : false,
+    });
+    }
+    emitPhase(PHASES.CAPTURE_ACQUIRED);
 
     const track = stream.getVideoTracks()[0];
-    // Tela é texto e interface, onde suavizar borra o que importa. Câmera é
-    // vídeo natural, e aí suavizar é justamente o certo.
-    track.contentHint = fonte === 'camera' ? 'motion' : 'text';
-    track.addEventListener('ended', () =>
-      stop(
-        fonte === 'camera'
-          ? 'A câmera foi desligada.'
-          : 'Você parou o compartilhamento pelo navegador.'
-      )
-    );
+    // Diz ao encoder o tipo de conteúdo: 'text' preserva nitidez de UI,
+    // 'motion' prioriza movimento. No modo auto, deixamos o navegador decidir.
+    if (hint) track.contentHint = hint;
+    // Content hint REAL: o navegador pode recusar/ignorar o valor pedido.
+    // Releemos e guardamos o que de fato ficou (ex.: 'none' no modo jogos).
+    const appliedHint = track.contentHint ?? null;
+    track.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
 
+    // Fonte de captura e configuração real do track (diagnóstico do gargalo).
     const s = track.getSettings();
+    t.displaySurface = s.displaySurface ?? null; // 'monitor' | 'window' | 'browser'
+    t.trackReportedFps = s.frameRate ?? null;
+    t.captureWidth = s.width ?? null;
+    t.captureHeight = s.height ?? null;
+    t.contentHintReal = appliedHint;
+    if (DEBUG_PROBING && appliedHint !== hint) {
+      console.log(`[hint] pedi ${hint}, o navegador aplicou ${appliedHint}`);
+    }
+
     const target = fitWithin(s.width ?? 1280, s.height ?? 720);
 
     config = await pickConfig(target.width, target.height);
     if (!config) {
       cleanup();
-      throw new Error(
-        codecPreferido === 'auto'
-          ? 'Nenhum codec de vídeo suportado por este navegador.'
-          : `O codec ${codecPreferido.toUpperCase()} não é suportado nesta configuração. Escolha Automático ou outro codec.`
-      );
+      throw new Error('Nenhum codec de vídeo suportado por este navegador.');
     }
 
     await connect();
+    emitPhase(PHASES.TRANSPORT_CONNECTED);
 
     encoder = new VideoEncoder({
       output: onEncoded,
       error: (err) => stop(`Erro no encoder: ${err.message}`),
     });
     encoder.configure(config);
-
-    ws.send(JSON.stringify({ type: 'start' }));
+    emitPhase(PHASES.ENCODER_READY);
 
     running = true;
     wantKeyframe = true;
@@ -184,22 +274,73 @@ export function createBroadcaster({
     srcH = 0;
     startedAt = Date.now();
 
-    onStatus?.({
-      codec: config.codec,
-      width: config.width,
-      height: config.height,
-      direct: Boolean(window.MediaStreamTrackProcessor),
-    });
+    t.capturePath = window.MediaStreamTrackProcessor ? 'direct' : 'video';
+    t.hardwareAcceleration = config.hardwareAcceleration ?? 'requested';
+
+    tel = { captured: 0, submitted: 0, encoded: 0, dropped: 0, keyframes: 0 };
+    windowStartAt = performance.now();
+    emitStatus();
+
+    // O servidor NÃO é anunciado aqui (sem mídia ainda). O 'start' só sai no
+    // primeiro decoderConfig, em onEncoded — junto do stream-ready (fix Bug 3).
 
     statsTimer = setInterval(() => {
-      onStats?.({
+      const nowPerf = performance.now();
+      const dt = (nowPerf - windowStartAt) / 1000;
+      const now = Date.now();
+      const actualMbps = (bytes * 8) / 1e6;
+      const sample = {
         viewers,
-        fps: frames,
-        mbps: (bytes * 8) / 1e6,
-        seconds: Math.floor((Date.now() - startedAt) / 1000),
-      });
+        captureFps: dt > 0 ? Math.round(tel.captured / dt) : 0,
+        submittedFps: dt > 0 ? Math.round(tel.submitted / dt) : 0,
+        encodedFps: dt > 0 ? Math.round(tel.encoded / dt) : 0,
+        encoderQueueSize: encoder?.encodeQueueSize ?? 0,
+        droppedBeforeEncode: tel.dropped,
+        actualMbps: Number(actualMbps.toFixed(2)),
+        targetBitrate: adaptive.initialBitrate,
+        currentBitrate: adaptive.currentBitrate,
+        targetFps: fps,
+        codec: config.codec,
+        resolution: `${config.width}x${config.height}`,
+        contentHint: hint ?? 'none',
+        hardwareAcceleration: t.hardwareAcceleration,
+        bufferedAmount: ws?.bufferedAmount ?? 0,
+        transport: t.transport,
+        keyframes: tel.keyframes,
+        mode,
+        seconds: Math.floor((now - startedAt) / 1000),
+        feedback,
+        probingSummary: t.probingSummary,
+        // Diagnóstico de captura / contexto.
+        displaySurface: t.displaySurface,
+        trackReportedFps: t.trackReportedFps,
+        captureWidth: t.captureWidth,
+        captureHeight: t.captureHeight,
+        contentHint: t.contentHintReal ?? hint ?? 'none',
+        documentVisibility: t.documentVisibility,
+        previewActive: t.previewActive,
+        workerPipeline: t.workerPipeline,
+        captureFrameIntervalMs: t.captureFrameIntervalMs,
+      };
+      // Bug 2: montar o objeto primeiro e só então derivar o gargalo.
+      sample.bottleneck = identifyBottleneck(sample, config?.framerate ?? fps);
+      if (bottleneckIsCaptureStarved(sample, config?.framerate ?? fps)) {
+        sample.bottleneck = 'CAPTURE STARVED';
+      }
+      lastTelemetry = sample;
+      onStats?.(sample);
+      adaptive.onTick(sample);
+
+      // Nova janela: zera contadores e bitrate (contadores de bytes/telemetria).
+      tel.captured = 0;
+      tel.submitted = 0;
+      tel.encoded = 0;
+      tel.dropped = 0;
+      tel.keyframes = 0;
       bytes = 0;
       frames = 0;
+      windowStartAt = nowPerf;
+      adaptive.onTick(sample);
     }, 1000);
 
     pump(track);
@@ -208,50 +349,27 @@ export function createBroadcaster({
     const audioTrack = prepararSom(track, stream);
     if (audioTrack) pumpAudio(audioTrack);
 
-    return stream;
-  }
-
-  function capturarTela() {
-    return navigator.mediaDevices.getDisplayMedia(opcoesCaptura());
-  }
-
-  /**
-   * Câmera, sempre sem som.
-   *
-   * O microfone fica de fora de propósito: a voz já anda pela call do Discord,
-   * com cancelamento de eco que aqui não existe. Somá-la devolveria a mesma
-   * pessoa duas vezes, fora de sincronia — e o `prepararSom` nem chega a rodar,
-   * porque sem faixa de áudio no stream ele retorna null.
-   *
-   * 720p de teto porque câmera não tem texto a preservar: acima disso é banda
-   * gasta em ruído de sensor, e o teto de 1080p do `fitWithin` nem entra em
-   * jogo.
-   */
-  async function capturarCamera() {
-    // Algumas webcams/drivers recusam abrir diretamente em 720p/60, embora
-    // funcionem na configuração padrão do navegador. Tenta o perfil preferido
-    // primeiro e cai para o dispositivo padrão sem exigir outro clique.
+    // A transmissão só está pronta quando o primeiro chunk foi codificado e a
+    // config enviada ao servidor (stream-ready) — até lá não há mídia real.
+    const ready = new Promise((resolve) => {
+      readyResolve = resolve;
+    });
     try {
-      return await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: fps, max: fps },
-        },
-        audio: false,
-      });
-    } catch (preferredError) {
-      try {
-        return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      } catch (fallbackError) {
-        if (fallbackError.name === 'NotReadableError') {
-          throw new Error(
-            'A câmera está ocupada por outro aplicativo ou aba. Feche a câmera no Discord, OBS, Teams ou navegador e tente de novo.'
-          );
-        }
-        throw fallbackError;
-      }
+      await Promise.race([
+        ready,
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('A transmissão não começou a produzir vídeo. Tente de novo.')),
+            STREAM_READY_TIMEOUT_MS
+          )
+        ),
+      ]);
+    } catch (err) {
+      stop(err.message);
+      throw err;
     }
+
+    return stream;
   }
 
   /**
@@ -266,6 +384,7 @@ export function createBroadcaster({
    */
   function audioConstraints() {
     const c = {
+      systemAudio: 'include',
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: false,
@@ -276,27 +395,7 @@ export function createBroadcaster({
     return c;
   }
 
-  /**
-   * Impede que a captura de tela inteira misture o áudio do Discord, mas aceita
-   * áudio isolado de uma aba ou da janela do aplicativo (por exemplo, um jogo).
-   */
-  function opcoesCaptura({ video = { frameRate: { ideal: fps, max: fps } }, comSom = audio } = {}) {
-    const opts = { video, audio: comSom ? audioConstraints() : false };
-    if (comSom) {
-      opts.windowAudio = 'window';
-      opts.systemAudio = 'exclude';
-    }
-    return opts;
-  }
-
-  // `windowAudio` não aparece em getSupportedConstraints. `restrictOwnAudio`
-  // é mais recente e só liberamos som de janela onde ele indica uma pilha de
-  // captura atual — em dúvida, preservamos o comportamento seguro de só aba.
-  function somDeJanelaConfiavel() {
-    return Boolean(navigator.mediaDevices.getSupportedConstraints?.().restrictOwnAudio);
-  }
-
-  /**
+/**
    * Devolve a faixa de som, ou null quando ela traria a call de volta em eco.
    *
    * O nó: o som do sistema é capturado como uma mistura única, e nenhum
@@ -312,38 +411,19 @@ export function createBroadcaster({
    * dá para manter o vídeo da tela inteira e pegar o som de uma aba.
    */
   function prepararSom(videoTrack, capturado) {
-    if (!audio) return null;
     const faixa = capturado.getAudioTracks()[0];
-    const superficie = videoTrack.getSettings?.().displaySurface;
+    if (!faixa) return null;
 
-    if (faixa && somIsolado(superficie)) {
-      somBloqueado = false;
-      return faixa;
-    }
+    if (videoTrack.getSettings?.().displaySurface === 'browser') return faixa;
 
-    if (faixa) {
-      faixa.stop();
-      capturado.removeTrack(faixa);
-    }
+    faixa.stop();
+    capturado.removeTrack(faixa);
     somBloqueado = true;
-    onAviso?.(avisoSemSom(superficie, Boolean(faixa)));
+    onAviso?.(
+      'A tela inteira carrega o som do Discord junto, e a call se ouviria em eco. ' +
+        'Transmitindo sem som — use "Som de uma aba" para escolher de onde vem o áudio.'
+    );
     return null;
-  }
-
-  function somIsolado(superficie) {
-    return superficie === 'browser' || (superficie === 'window' && somDeJanelaConfiavel());
-  }
-
-  function avisoSemSom(superficie, tinhaFaixa) {
-    const saida = ' Use “Som de uma aba ou janela” para escolher a fonte.';
-    if (superficie === 'window' && !somDeJanelaConfiavel()) {
-      return 'Este navegador não isola o som por janela; transmitiríamos o Discord em eco.' + saida;
-    }
-    if (superficie === 'monitor') {
-      return 'A tela inteira carrega o som do Discord junto. Transmitindo sem som.' + saida;
-    }
-    if (tinhaFaixa) return 'Não deu para confirmar que esse som é isolado; ele foi removido.' + saida;
-    return 'A captura veio sem som — marque “Compartilhar o áudio” no seletor.' + saida;
   }
 
   /**
@@ -356,9 +436,10 @@ export function createBroadcaster({
    */
   async function trocarSom() {
     // Precisa vir do gesto do usuário, como qualquer getDisplayMedia.
-    const escolha = await navigator.mediaDevices.getDisplayMedia(
-      opcoesCaptura({ video: true, comSom: true })
-    );
+    const escolha = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: audioConstraints(),
+    });
 
     const faixa = escolha.getAudioTracks()[0];
     const superficie = escolha.getVideoTracks()[0]?.getSettings?.().displaySurface;
@@ -369,18 +450,14 @@ export function createBroadcaster({
     if (!faixa) {
       escolha.getTracks().forEach((t) => t.stop());
       throw new Error(
-        somDeJanelaConfiavel()
-          ? 'Essa escolha veio sem som. Escolha uma aba ou janela e marque “Compartilhar o áudio”.'
-          : 'Essa escolha veio sem som. Escolha uma aba e marque “Compartilhar o áudio da guia”.'
+        'Essa escolha veio sem som. Escolha uma aba e marque "Compartilhar o áudio da guia".'
       );
     }
 
-    if (!somIsolado(superficie)) {
+    if (superficie !== 'browser') {
       faixa.stop();
       throw new Error(
-        superficie === 'window'
-          ? 'Este navegador não isola o som por janela. Escolha uma aba.'
-          : 'Tela inteira traria o Discord junto. Escolha uma aba ou a janela do aplicativo.'
+        'Só aba tem som isolado. Tela inteira traria o Discord junto e a call se ouviria.'
       );
     }
 
@@ -396,7 +473,7 @@ export function createBroadcaster({
     audioEncoder = null;
 
     somBloqueado = false;
-    faixa.addEventListener('ended', () => onAviso?.('A fonte do som foi fechada.'));
+    faixa.addEventListener('ended', () => onAviso?.('A aba do som foi fechada.'));
     pumpAudio(faixa);
     return faixa;
   }
@@ -467,20 +544,58 @@ export function createBroadcaster({
   }
 
   async function pickConfig(width, height) {
-    // Duas passadas: navegadores que não conhecem `latencyMode` podem recusar a
-    // configuração inteira por causa dela. Mais latência é melhor que nada.
-    for (const realtime of [true, false]) {
-      for (const candidate of candidatesFor(codecPreferido)) {
-        const cfg = { ...candidate, width, height, bitrate, framerate: fps };
-        if (realtime) cfg.latencyMode = 'realtime';
-        try {
-          const { supported } = await VideoEncoder.isConfigSupported(cfg);
-          if (supported) return cfg;
-        } catch {
-          // candidato inválido neste navegador; tenta o próximo
+    // Três passadas, da mais específica para a mais tolerante:
+    //  1. prefer-hardware (quando o navegador conhece o campo)
+    //  2. sem o campo (deixa o navegador decidir)
+    //  3. sem latencyMode (navegadores que recusam a config inteira por causa dele)
+    // `hardwareAcceleration: 'prefer-hardware'` é um pedido, NUNCA uma prova de
+    // que a GPU foi usada — a UI mostra "requested", não o nome do backend.
+    const variantes = [];
+    for (const hw of ['prefer-hardware', undefined]) {
+      for (const realtime of [true, false]) {
+        for (const candidate of CANDIDATES) {
+          const cfg = { ...candidate, width, height, bitrate, framerate: fps };
+          if (hw) cfg.hardwareAcceleration = hw;
+          if (realtime) cfg.latencyMode = 'realtime';
+          variantes.push(cfg);
         }
       }
     }
+    // Passada final sem latencyMode, caso algum navegador recuse a config por ele.
+    for (const candidate of CANDIDATES) {
+      variantes.push({ ...candidate, width, height, bitrate, framerate: fps });
+    }
+
+    // Diagnóstico de probing: só em modo debug (nunca spam para o usuário).
+    // Registra por variante para entendermos POR QUE um codec foi escolhido
+    // (ex.: por que VP8 e não H.264).
+    const probeLog = [];
+    t.probing = [];
+
+    for (const cfg of variantes) {
+      let supported = false;
+      let reason = null;
+      try {
+        ({ supported } = await VideoEncoder.isConfigSupported(cfg));
+      } catch (err) {
+        supported = false;
+        reason = err?.message ?? String(err);
+      }
+      const format = cfg.codec.startsWith('avc') ? (cfg.avc?.format ?? 'AVC') : '';
+      const hw = cfg.hardwareAcceleration ? '+prefer-hardware' : '+auto';
+      const rt = cfg.latencyMode ? '+realtime' : '';
+      const rotulo = `${cfg.codec}${format ? ' ' + format : ''}${hw}${rt}`;
+      probeLog.push(`${rotulo}: ${supported ? 'SUPPORTED' : reason ? `ERROR(${reason})` : 'UNSUPPORTED'}`);
+      t.probing.push({ codec: cfg.codec, format: format || null, hw: cfg.hardwareAcceleration, realtime: Boolean(cfg.latencyMode), supported, reason });
+      if (DEBUG_PROBING) console.log('[probe]', rotulo, supported ? 'SUPPORTED' : reason ? `ERROR(${reason})` : 'UNSUPPORTED');
+      if (supported) {
+        if (DEBUG_PROBING) console.log('[probe] escolhido:', rotulo);
+        t.probingSummary = probeLog.join(' | ');
+        return cfg;
+      }
+    }
+    if (DEBUG_PROBING) console.log('[probe] nenhum codec suportado:', probeLog.join(' | '));
+    t.probingSummary = probeLog.join(' | ');
     return null;
   }
 
@@ -494,6 +609,7 @@ export function createBroadcaster({
   /** Chromium: acesso direto aos quadros, sem cópia intermediária. */
   async function pumpDirect(track) {
     reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    emitPhase(PHASES.CAPTURE_PUMPING);
     while (running) {
       let frame;
       try {
@@ -513,6 +629,7 @@ export function createBroadcaster({
     video.muted = true;
     video.playsInline = true;
     video.srcObject = stream;
+    emitPhase(PHASES.CAPTURE_PUMPING);
     // Fora do fluxo mas no DOM: alguns navegadores não decodificam um elemento
     // solto, e display:none chega a pausar a reprodução.
     Object.assign(video.style, {
@@ -566,9 +683,17 @@ export function createBroadcaster({
       frame.close();
       return false;
     }
-    // Backpressure: fila no encoder vira latência que nunca mais sai.
-    if (encoder.encodeQueueSize > 2) {
+    tel.captured++;
+
+    // Política de fila mensurável (Fase 5), em vez de limite mágico:
+    //   0–1: normal
+    //   2:   atenção — ainda codifica, mas sinaliza o adaptive controller
+    //   >=3: drop seletivo — nunca acumular atraso
+    const q = encoder.encodeQueueSize;
+    if (q >= DROP_QUEUE_THRESHOLD) {
       frame.close();
+      tel.dropped++;
+      adaptive.onPressure('encode-queue', q);
       return true;
     }
 
@@ -585,9 +710,16 @@ export function createBroadcaster({
       out = new VideoFrame(stage, { timestamp });
     }
 
+    // submittedFrames: encoder.encode chamado com sucesso.
+    if (!firstFrameSubmitted) {
+      firstFrameSubmitted = true;
+      emitPhase(PHASES.FIRST_FRAME_SUBMITTED);
+    }
+    tel.submitted++;
     try {
       encoder.encode(out, { keyFrame: wantKeyframe });
       if (wantKeyframe) {
+        tel.keyframes++;
         lastKeyframeAt = now;
         wantKeyframe = false;
       }
@@ -597,6 +729,39 @@ export function createBroadcaster({
 
     out.close();
     frames++;
+
+    // encodedFrames é incrementado em onEncoded (Bug 3): só quando o encoder
+    // REALMENTE produziu um chunk. Isso diferencia submitted (pedido) de
+    // encoded (produzido) e revela gargalo real de encoder (capture 60,
+    // submitted 60, encoded 43).
+
+    // Sinaliza pressão de fila ao adaptive (não cai no drop seletivo ainda).
+    if (q >= 2) adaptive.onPressure('encode-queue', q);
+    return true;
+  }
+
+  /** Aplica um novo bitrate ao encoder e força keyframe. */
+  function applyBitrate(novoBitrate) {
+    if (encoder?.state !== 'configured') return;
+    config = { ...config, bitrate: novoBitrate };
+    encoder.configure(config);
+    wantKeyframe = true;
+  }
+
+  /**
+   * Detecta CAPTURE STARVED: o gargalo está ANTES do encoder.
+   * Quando capture == submitted == encoded, queue == 0 e drops == 0, o encoder
+   * e a rede estão acompanhando — quem não entrega quadros é a captura/browser/
+   * GPU scheduling. NÃO adaptar bitrate/transporte neste caso (não resolve).
+   */
+  function bottleneckIsCaptureStarved(sample, targetFps = 60) {
+    const target = targetFps || 60;
+    if (sample.captureFps <= 0) return false;
+    if (sample.captureFps >= target) return false; // saudável
+    if (sample.captureFps !== sample.submittedFps) return false;
+    if (sample.captureFps !== sample.encodedFps) return false;
+    if (sample.encoderQueueSize >= 2) return false; // senão é encoder
+    if (sample.droppedBeforeEncode > 0) return false;
     return true;
   }
 
@@ -619,12 +784,9 @@ export function createBroadcaster({
       config = { ...config, ...target };
       encoder.configure(config);
       wantKeyframe = true;
-      onStatus?.({
-        codec: config.codec,
-        width: config.width,
-        height: config.height,
-        direct: Boolean(window.MediaStreamTrackProcessor),
-      });
+      // Bug 5: mesma estrutura de status em todo reconfigure — nunca omitir
+      // hardwareAcceleration/transport/mode/hint.
+      emitStatus();
     }
 
     // fitWithin preserva a proporção, então reduzir não corta nada.
@@ -637,15 +799,29 @@ export function createBroadcaster({
       stage.height = target.height;
       stageCtx = stage.getContext('2d', { alpha: false, desynchronized: true });
     }
+    t.captureFrameIntervalMs = 1000 / fps;
   }
 
   function onEncoded(chunk, metadata) {
     if (ws?.readyState !== WebSocket.OPEN) return;
+    // Bug 3: encodedFrames é contado aqui — quando o encoder REALMENTE produziu
+    // um chunk — e não logo após encoder.encode(). Isso separa submitted
+    // (pedido) de encoded (produzido) e revela gargalo real de encoder.
+    tel.encoded++;
 
     // O decoderConfig chega no primeiro chunk e sempre que a config muda.
+    // O 'start' do servidor só sai junto do PRIMEIRO decoderConfig: a partir
+    // daí a pipeline produz mídia de verdade (fix Bug 3).
     if (metadata?.decoderConfig) {
-      decoderConfig = serializeConfig(metadata.decoderConfig);
-      ws.send(JSON.stringify({ type: 'config', config: decoderConfig }));
+      ws.send(JSON.stringify({ type: 'config', config: serializeConfig(metadata.decoderConfig) }));
+      if (!serverStarted) {
+        serverStarted = true;
+        ws.send(JSON.stringify({ type: 'start' }));
+        emitPhase(PHASES.FIRST_FRAME_ENCODED);
+        emitPhase(PHASES.STREAM_READY);
+        readyResolve?.();
+        readyResolve = null;
+      }
     }
 
     const data = new Uint8Array(chunk.byteLength);
@@ -716,11 +892,8 @@ export function createBroadcaster({
         else if (msg.type === 'state') viewers = msg.viewers;
         // Alguém entrou na sala e precisa de um ponto de partida.
         else if (msg.type === 'need-keyframe') wantKeyframe = true;
-        // O servidor não tinha a configuração quando alguém clicou para
-        // assistir. Reenviar a última evita uma live "no ar" sem decoder.
-        else if (msg.type === 'need-config' && decoderConfig) {
-          ws.send(JSON.stringify({ type: 'config', config: decoderConfig }));
-        }
+        // Fase 7 — resumo do feedback dos viewers (agregado pelo servidor).
+        else if (msg.type === 'viewer-health') feedback = msg.health ?? null;
         else if (msg.type === 'stop-request') stop('Transmissão encerrada pela atividade.');
         else if (msg.type === 'error') {
           if (running) stop(msg.message);
@@ -755,14 +928,17 @@ export function createBroadcaster({
    */
   async function changeScreen() {
     // Precisa vir do gesto do usuário, como qualquer getDisplayMedia.
-    const fresh = await navigator.mediaDevices.getDisplayMedia(opcoesCaptura());
+    const fresh = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: fps, max: fps } },
+      audio: audio ? audioConstraints() : false,
+    });
 
     const previous = stream;
     const previousReader = reader;
 
     stream = fresh;
     const track = fresh.getVideoTracks()[0];
-    track.contentHint = 'text';
+    if (hint) track.contentHint = hint;
     track.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
 
     // Encerra o loop anterior antes de abrir outro, senão os dois disputam o
@@ -795,11 +971,14 @@ export function createBroadcaster({
 
   /** Ajusta qualidade e taxa de quadros com a transmissão no ar. */
   function setQuality({ bitrate: nextBitrate, fps: nextFps } = {}) {
-    if (nextBitrate) bitrate = nextBitrate;
+    if (nextBitrate) {
+      bitrate = nextBitrate;
+      adaptive.reset(nextBitrate); // novo teto; currentBitrate volta para ele
+    }
     if (nextFps) fps = nextFps;
     if (encoder?.state !== 'configured') return;
 
-    config = { ...config, bitrate, framerate: fps };
+    config = { ...config, bitrate: adaptive.currentBitrate, framerate: fps };
     encoder.configure(config);
     wantKeyframe = true;
 
@@ -861,8 +1040,16 @@ export function createBroadcaster({
     trocarSom,
     setQuality,
     getSettings,
+    getTelemetry: () => lastTelemetry ?? null,
     temSom: () => Boolean(audioEncoder),
     somBloqueado: () => somBloqueado,
     isRunning: () => running,
+    getMode: () => mode,
+    getPhase: () => currentPhase,
+    // Contexto de UI: preview ativo e visibilidade do documento. Não afetam o
+    // pipeline (a transmissão nunca depende deles), só a telemetria.
+    setPreviewActive: (v) => (t.previewActive = v),
+    setVisibility: (v) => (t.documentVisibility = v),
+    getPreviewActive: () => t.previewActive,
   };
 }

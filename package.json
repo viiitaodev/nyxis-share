@@ -18,7 +18,8 @@
     "start:fast": "node scripts/start-fast.mjs",
     "build": "npm -w client run build",
     "smoke": "node scripts/smoke.mjs",
-    "smoke:admin": "node scripts/admin-smoke.mjs"
+    "smoke:admin": "node scripts/admin-smoke.mjs",
+    "test": "node shared/broadcast-mode.test.mjs && node shared/adaptive.test.mjs && node shared/bottleneck.test.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

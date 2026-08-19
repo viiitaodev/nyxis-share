@@ -106,7 +106,12 @@ app.use(
 app.use(
   '/shared',
   express.static(path.join(__dirname, '..', 'shared'), {
-    setHeaders: (res) => res.setHeader('Cache-Control', 'no-store'),
+    setHeaders: (res, filePath) => {
+      res.setHeader('Cache-Control', 'no-store');
+      // O worker é um módulo ES (DedicatedWorker type:module). Chromium exige
+      // o MIME text/javascript — sem isto o worker recusa a carregar.
+      if (filePath.endsWith('.mjs')) res.setHeader('Content-Type', 'text/javascript');
+    },
   })
 );
 
@@ -801,12 +806,21 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
 
+  // A fonte não vai assinada, como `q`, `fps` e `som` também não vão: ela não
+  // concede nada. Quem tem o token já pode transmitir nesta sala — a fonte só
+  // rotula o stream e escolhe qual das duas vagas da pessoa é ocupada, e o teto
+  // por pessoa é imposto no registro, não aqui.
+  const pedida = url.searchParams.get('fonte');
+  const fonte = R.FONTES.has(pedida) ? pedida : 'tela';
+  // A aba de captura abre esta conexão ao carregar, antes de qualquer captura.
+  const controle = url.searchParams.get('modo') === 'controle';
+
   wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit('connection', ws, req, payload);
+    wss.emit('connection', ws, req, payload, fonte, controle);
   });
 });
 
-wss.on('connection', (ws, _req, auth) => {
+wss.on('connection', (ws, _req, auth, fonte, controle) => {
   ws.__connectedAt = Date.now();
   ws.__rttMs = null;
   ws.__pingSentAt = null;
@@ -819,15 +833,39 @@ wss.on('connection', (ws, _req, auth) => {
     return;
   }
 
-  if (auth.role === 'broadcaster') {
-    handleBroadcaster(ws, room, { id: auth.uid, name: auth.name, avatar: auth.av ?? null });
+  if (auth.role === 'broadcaster' && controle) {
+    handleControl(ws, room, auth);
+  } else if (auth.role === 'broadcaster') {
+    handleBroadcaster(ws, room, { id: auth.uid, name: auth.name, avatar: auth.av ?? null }, fonte);
   } else {
     handleViewer(ws, room, auth);
   }
 });
 
-function handleBroadcaster(ws, room, info) {
-  const entry = R.attachBroadcaster(room, ws, info);
+/**
+ * A aba de captura, sem mídia nenhuma: só recebe recados.
+ *
+ * Ela não transmite por aqui — quando começa, abre uma conexão de transmissão
+ * separada, uma por fonte. Esta serve para a atividade alcançá-la enquanto
+ * ainda não há nada no ar, que é justamente quando o `broadcastersOf` não
+ * encontraria ninguém.
+ */
+function handleControl(ws, room, auth) {
+  R.attachControl(room, ws, auth.uid);
+  console.log(`[room ${room.id}] aba de captura de ${auth.name} conectada`);
+
+  R.broadcastState(room);
+
+  const sair = () => {
+    R.detachControl(room, ws);
+    R.broadcastState(room);
+  };
+  ws.on('close', sair);
+  ws.on('error', sair);
+}
+
+function handleBroadcaster(ws, room, info, fonte) {
+  const entry = R.attachBroadcaster(room, ws, info, fonte);
 
   if (typeof entry === 'string') {
     R.sendJson(ws, { type: 'error', message: entry });
@@ -835,7 +873,9 @@ function handleBroadcaster(ws, room, info) {
     return;
   }
 
-  console.log(`[room ${room.id}] broadcaster conectado: ${info.name} (slot ${entry.slot})`);
+  console.log(
+    `[room ${room.id}] broadcaster conectado: ${info.name} · ${fonte} (slot ${entry.slot})`
+  );
 
   ws.on('message', (data, isBinary) => {
     if (isBinary) {
@@ -852,7 +892,7 @@ function handleBroadcaster(ws, room, info) {
 
     if (msg.type === 'start') {
       R.startStream(room, entry);
-      console.log(`[room ${room.id}] stream iniciada por ${info.name}`);
+      console.log(`[room ${room.id}] stream-start slot=${entry.slot} por ${info.name} (config ja em mãos)`);
     } else if (msg.type === 'config' && msg.config) {
       R.setConfig(room, entry, msg.config);
       console.log(`[room ${room.id}] codec de ${info.name}: ${msg.config.codec}`);
@@ -901,13 +941,47 @@ function handleViewer(ws, room, auth) {
       return;
     }
 
+    // Fase 7 — telemetria do viewer, agregada e repassada ao broadcaster.
+    if (msg.type === 'viewer-feedback' && Number.isInteger(msg.slot) && msg.telemetry) {
+      R.viewerFeedback(room, ws, msg.slot, msg.telemetry);
+      return;
+    }
+
     // Encerrar a própria transmissão de dentro da Activity, sem ter que achar
     // a aba de captura. Cada um só encerra a sua.
+    // Ligar a outra fonte sem abrir uma segunda aba: quem já está transmitindo
+    // tem uma aba conectada, e é ela que consegue capturar. A atividade só
+    // pede; a aba decide o que dá para fazer sem gesto (câmera dá, tela não).
+    if (msg.type === 'start-broadcast' && R.FONTES.has(msg.fonte)) {
+      // Vai para a aba, e não para as conexões de transmissão: é ela quem tem o
+      // gesto do usuário e a permissão, e ela existe mesmo com nada no ar.
+      const n = R.toControls(room, auth.uid, {
+        type: 'start-request',
+        fonte: msg.fonte,
+        opcoes: msg.opcoes,
+      });
+      if (n) console.log(`[room ${room.id}] ${auth.name} pediu ${msg.fonte} à própria aba`);
+      return;
+    }
+
+    // Configuração trocada na engrenagem. Chega à aba na hora, sem esperar o
+    // próximo início: era o que fazia o resumo dela envelhecer em silêncio.
+    if (msg.type === 'config-broadcast' && msg.opcoes) {
+      R.toControls(room, auth.uid, { type: 'config-request', opcoes: msg.opcoes });
+      return;
+    }
+
     if (msg.type === 'stop-broadcast') {
-      const entry = R.broadcasterOf(room, auth.uid);
-      if (entry) {
-        R.sendJson(entry.ws, { type: 'stop-request' });
-        console.log(`[room ${room.id}] parada pedida por ${auth.name}`);
+      // Sem fonte, para tudo o que a pessoa estiver transmitindo. É o que o
+      // botão da barra sempre fez, e continua valendo para quem só tem uma.
+      const fonte = R.FONTES.has(msg.fonte) ? msg.fonte : null;
+      const alvos = R.broadcastersOf(room, auth.uid, fonte);
+
+      for (const entry of alvos) R.sendJson(entry.ws, { type: 'stop-request' });
+      if (alvos.length) {
+        console.log(
+          `[room ${room.id}] parada pedida por ${auth.name}: ${alvos.map((e) => e.fonte).join(', ')}`
+        );
       }
     }
   });

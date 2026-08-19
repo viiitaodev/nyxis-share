@@ -97,15 +97,27 @@
       </div>
 
       <!-- Barra de controles. Ocupa espaço no layout: não passa por cima da tela -->
-      <div class="bottombar">
+      <div id="bottombar" class="bottombar">
         <div id="panel" class="panel" hidden>
           <div class="panel-row"><span>Transmitindo</span><strong id="pWho">—</strong></div>
-          <div class="panel-row"><span>Latência</span><strong id="pLag">—</strong></div>
+          <div class="panel-row"><span>Latência est.</span><strong id="pLag">—</strong></div>
           <div class="panel-row"><span>Quadros</span><strong id="pFps">—</strong></div>
           <div class="panel-row"><span>Resolução</span><strong id="pRes">—</strong></div>
           <div class="panel-row"><span>Som</span><strong id="pSom">—</strong></div>
+          <div id="viewerDetails" class="panel-sub"></div>
           <button id="probe" class="panel-btn">Testar captura no iframe</button>
         </div>
+
+        <button
+          id="controlsCollapse"
+          class="btn controls-collapse"
+          data-tip="Recolher controles"
+          aria-label="Recolher controles"
+          aria-expanded="true"
+          hidden
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+        </button>
 
         <div class="dock">
           <div class="group">
@@ -115,6 +127,13 @@
                 <path d="M8 20h8" />
               </svg>
               <span id="shareLabel">Compartilhar tela</span>
+            </button>
+            <button id="camera" class="btn wide" title="Ligar câmera">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M23 7l-7 5 7 5V7z" />
+                <rect x="1" y="5" width="15" height="14" rx="2" />
+              </svg>
+              <span id="cameraLabel">Ligar câmera</span>
             </button>
             <button
               id="liveSettings"
@@ -214,42 +233,60 @@
       <div id="modal" class="modal" hidden>
         <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
           <h2 id="modalTitle">Compartilhar sua tela</h2>
-          <p id="modalSub" class="modal-sub">Escolha a tela e comece a transmitir.</p>
+          <p id="modalSub" class="modal-sub">Escolha como e comece a transmitir.</p>
+
+          <label class="field">
+            <span>Modo</span>
+            <select id="mMode">
+              <option value="auto" selected>Automático</option>
+              <option value="motion">Jogos / Movimento</option>
+              <option value="text">Texto / Trabalho</option>
+            </select>
+          </label>
 
           <label class="field">
             <span>Qualidade</span>
             <select id="mQuality">
-              <option value="1000000">Leve — 1 Mbps</option>
-              <option value="2500000" selected>Boa — 2,5 Mbps</option>
+              <option value="2500000">Boa — 2,5 Mbps</option>
               <option value="5000000">Alta — 5 Mbps</option>
-              <option value="8000000">Máxima — 8 Mbps</option>
+              <option value="8000000" selected>Máxima — 8 Mbps</option>
             </select>
           </label>
 
           <label class="field">
             <span>Taxa de quadros</span>
             <select id="mFps">
-              <option value="15">15 fps — economiza banda</option>
-              <option value="30" selected>30 fps — mais fluido</option>
-              <option value="60">60 fps — jogo e vídeo, exija 5 Mbps ou mais</option>
+              <option value="30">30 fps</option>
+              <option value="60" selected>60 fps</option>
             </select>
           </label>
 
-          <label class="field-check">
-            <input id="mAudio" type="checkbox" />
-            <span>
-              Compartilhar o som
-              <em class="opt">
-                O som vem de uma <strong>aba</strong> ou da <strong>janela do aplicativo</strong>
-                — escolha uma delas na janela seguinte e marque "Compartilhar o áudio". Para
-                levar o som de um jogo, compartilhe o jogo como janela: a tela inteira
-                carregaria o som do Discord junto, e a call se ouviria em eco.
-              </em>
-            </span>
+          <label class="field">
+            <span>Codec</span>
+            <select id="mCodec">
+              <option value="auto" selected>Automático — melhor disponível</option>
+              <option value="h264">H.264 — prioriza aceleração por hardware</option>
+              <option value="vp8">VP8 — máxima compatibilidade</option>
+              <option value="vp9">VP9 — melhor qualidade por bitrate</option>
+            </select>
           </label>
 
-          <button id="modalSwap" class="panel-btn" hidden>Trocar a tela compartilhada</button>
-          <button id="modalSom" class="panel-btn" hidden>Som de uma aba ou janela</button>
+          <details class="modal-advanced">
+            <summary>Opções avançadas</summary>
+            <label class="field-check">
+              <input id="mAudio" type="checkbox" />
+              <span>
+                Compartilhar o som
+                <em class="opt">
+                  O som vem de uma <strong>aba</strong> ou da <strong>janela do aplicativo</strong> —
+                  escolha uma delas e marque “Compartilhar o áudio”. Para jogos, compartilhe a
+                  janela do jogo; tela inteira carregaria o Discord junto, causando eco.
+                </em>
+              </span>
+            </label>
+            <button id="modalSwap" class="panel-btn" hidden>Trocar a tela compartilhada</button>
+            <button id="modalSom" class="panel-btn" hidden>Som de uma aba ou janela</button>
+          </details>
 
           <p id="modalNote" class="modal-note">
             Se o Discord não permitir capturar aqui dentro, a escolha da tela abre numa aba do
