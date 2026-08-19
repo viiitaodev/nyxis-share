@@ -210,6 +210,40 @@ async function start() {
   $('start').disabled = true;
   setStatus('Aguardando você escolher a tela…');
 
+  // A janela nativa de seleção PRECISA nascer diretamente deste clique. Deixar
+  // a chamada escondida dentro de broadcaster.start() normalmente funciona,
+  // mas alguns Chromiums perdem a ativação transitória ao atravessar essa
+  // camada assíncrona e deixam a Promise pendurada — o botão fica desabilitado
+  // e nenhum seletor aparece. Capturamos aqui e entregamos o stream pronto ao
+  // pipeline; o broadcaster inline já sabe reutilizá-lo sem perguntar de novo.
+  //
+  // Não coloque nenhum `await` antes desta chamada.
+  let captured;
+  try {
+    captured = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: Number($('fps').value), max: Number($('fps').value) } },
+      audio: $('withAudio').checked
+        ? {
+            systemAudio: 'include',
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            ...(navigator.mediaDevices.getSupportedConstraints?.().restrictOwnAudio
+              ? { restrictOwnAudio: true }
+              : {}),
+          }
+        : false,
+    });
+  } catch (err) {
+    $('start').disabled = false;
+    setStatus(
+      err.name === 'NotAllowedError' ? 'Você cancelou a seleção de tela.' : err.message,
+      'error'
+    );
+    console.debug('[share] capture-failed', { name: err?.name, message: err?.message });
+    return;
+  }
+
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 
   // No modo Jogos o preview sai desligado por padrão: ele não deve competir
@@ -230,6 +264,7 @@ async function start() {
     fps: Number($('fps').value),
     audio: $('withAudio').checked,
     mode: $('mode')?.value ?? 'auto',
+    stream: captured,
     onPhase: (p) => {
       const elapsed = performance.now() - phaseAt;
       console.log(`[share] phase=${p} t=${Math.round(elapsed)}ms`);
