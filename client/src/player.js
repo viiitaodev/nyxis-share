@@ -27,6 +27,10 @@ export function createPlayer(canvas, { onError, onTamanho } = {}) {
   // desse intervalo é idêntico a um travamento.
   let virgem = true;
 
+  // Telemetria real do viewer (Fase 1/7) — nunca maquiar FPS.
+  let tel = { received: 0, decoded: 0, dropped: 0, maxDecodeQueue: 0 };
+  let telemetry = null;
+
   function start(rawConfig) {
     stop();
 
@@ -44,6 +48,7 @@ export function createPlayer(canvas, { onError, onTamanho } = {}) {
         // pedir um keyframe recupera sem derrubar a sessão.
         console.warn('[decoder]', err.message);
         needKeyframe = true;
+        tel.dropped++;
       },
     });
 
@@ -56,6 +61,7 @@ export function createPlayer(canvas, { onError, onTamanho } = {}) {
     }
 
     needKeyframe = true;
+    tel = { received: 0, decoded: 0, dropped: 0, maxDecodeQueue: 0 };
     return true;
   }
 
@@ -67,11 +73,17 @@ export function createPlayer(canvas, { onError, onTamanho } = {}) {
     const isKeyframe = view.getUint8(1) === 1;
 
     // Decoder frio só aceita keyframe; deltas antes disso viram erro.
-    if (needKeyframe && !isKeyframe) return;
+    if (needKeyframe && !isKeyframe) {
+      tel.dropped++;
+      return;
+    }
 
     const timestamp = view.getFloat64(2);
     const sentAt = view.getFloat64(10);
     lastLagMs = Date.now() - sentAt;
+    tel.received++;
+
+    if (decoder.decodeQueueSize > tel.maxDecodeQueue) tel.maxDecodeQueue = decoder.decodeQueueSize;
 
     try {
       decoder.decode(
@@ -85,6 +97,7 @@ export function createPlayer(canvas, { onError, onTamanho } = {}) {
     } catch (err) {
       console.warn('[decode]', err.message);
       needKeyframe = true;
+      tel.dropped++;
     }
   }
 
@@ -103,6 +116,7 @@ export function createPlayer(canvas, { onError, onTamanho } = {}) {
     // VideoFrame segura memória de GPU; sem close() a aba trava em segundos.
     frame.close();
     framesDrawn++;
+    tel.decoded++;
 
     // Avisa no primeiro quadro e sempre que a resolução muda: quem desenha o
     // palco precisa das duas coisas — tirar o "conectando" e refazer a forma.
@@ -145,7 +159,32 @@ export function createPlayer(canvas, { onError, onTamanho } = {}) {
     return n;
   }
 
-  return { start, push, stop, getLag, takeFrameCount, getSizes };
+  /**
+   * Telemetria do viewer (Fase 1/7). `dt` em segundos; converte contadores em
+   * FPS real. Chamar ~1x/s no main.js.
+   */
+  function takeTelemetry(dt) {
+    const receivedFps = dt > 0 ? Math.round(tel.received / dt) : 0;
+    const decodedFps = dt > 0 ? Math.round(tel.decoded / dt) : 0;
+    const renderedFps = takeFrameCount(); // frames desenhados na janela
+    const sample = {
+      receivedFps,
+      decodedFps,
+      renderedFps,
+      decodeQueueSize: decoder?.decodeQueueSize ?? 0,
+      droppedFrames: tel.dropped,
+      estimatedLatencyMs: Math.max(0, Math.round(lastLagMs)),
+    };
+    tel.received = 0;
+    tel.decoded = 0;
+    tel.dropped = 0;
+    telemetry = sample;
+    return sample;
+  }
+
+  const getTelemetry = () => telemetry;
+
+  return { start, push, stop, getLag, takeFrameCount, takeTelemetry, getTelemetry, getSizes };
 }
 
 function deserialize(c) {

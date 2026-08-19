@@ -499,6 +499,62 @@ export function unwatch(room, ws, slot) {
   broadcastState(room);
 }
 
+/**
+ * Fase 7 — recebe feedback de um viewer e agrega por slot.
+ *
+ * O viewer manda telemetria ~1x/s. Não repassamos cada mensagem ao broadcaster
+ * (seriam muitas); agregamos o pior caso e enviamos `viewer-health` quando o
+ * broadcaster ainda não recebeu o resumo desta janela.
+ */
+export function viewerFeedback(room, ws, slot, telemetry) {
+  const entry = room.slots.get(slot);
+  if (!entry || !entry.streaming) return;
+
+  if (!room.__feedback) room.__feedback = new Map(); // slot -> agregado
+  const agg = room.__feedback.get(slot) ?? {
+    viewerCount: 0,
+    worstRenderedFps: Infinity,
+    worstLatency: 0,
+    congestedViewers: 0,
+    received: 0,
+  };
+
+  const current = ws.__feedbackSlot;
+  if (current === slot) {
+    // Este viewer já contribuiu nesta janela: atualiza no lugar.
+    agg.received = 1;
+    agg.viewerCount = Math.max(1, agg.viewerCount);
+  } else {
+    ws.__feedbackSlot = slot;
+    agg.received++;
+  }
+
+  if (Number.isFinite(telemetry?.renderedFps)) {
+    agg.worstRenderedFps = Math.min(agg.worstRenderedFps, telemetry.renderedFps);
+  }
+  if (Number.isFinite(telemetry?.estimatedLatencyMs)) {
+    agg.worstLatency = Math.max(agg.worstLatency, telemetry.estimatedLatencyMs);
+  }
+  if (Number.isFinite(telemetry?.decodeQueueSize) && telemetry.decodeQueueSize >= 3) {
+    agg.congestedViewers++;
+  }
+  room.__feedback.set(slot, agg);
+
+  // Envia o resumo uma vez por janela (cooldown de ~1s).
+  const now = Date.now();
+  if (!room.__feedbackSentAt || now - room.__feedbackSentAt > 1000) {
+    room.__feedbackSentAt = now;
+    const health = {
+      worstRenderedFps: Number.isFinite(agg.worstRenderedFps) ? agg.worstRenderedFps : 0,
+      worstLatency: agg.worstLatency,
+      congestedViewers: agg.congestedViewers,
+      viewerCount: entry.watchers?.size ?? room.viewers.size,
+    };
+    sendJson(entry.ws, { type: 'viewer-health', health });
+    room.__feedback.delete(slot);
+  }
+}
+
 export function attachViewer(room, ws, info) {
   ws.__primed = new Set();
   ws.__watching = new Set();
