@@ -208,15 +208,31 @@ export function createBroadcaster({
    * gasta em ruído de sensor, e o teto de 1080p do `fitWithin` nem entra em
    * jogo.
    */
-  function capturarCamera() {
-    return navigator.mediaDevices.getUserMedia({
-      video: {
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: fps, max: fps },
-      },
-      audio: false,
-    });
+  async function capturarCamera() {
+    // Algumas webcams/drivers recusam abrir diretamente em 720p/60, embora
+    // funcionem na configuração padrão do navegador. Tenta o perfil preferido
+    // primeiro e cai para o dispositivo padrão sem exigir outro clique.
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: fps, max: fps },
+        },
+        audio: false,
+      });
+    } catch (preferredError) {
+      try {
+        return await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      } catch (fallbackError) {
+        if (fallbackError.name === 'NotReadableError') {
+          throw new Error(
+            'A câmera está ocupada por outro aplicativo ou aba. Feche a câmera no Discord, OBS, Teams ou navegador e tente de novo.'
+          );
+        }
+        throw fallbackError;
+      }
+    }
   }
 
   /**
