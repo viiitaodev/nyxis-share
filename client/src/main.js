@@ -25,6 +25,12 @@ const streams = new Map(); // slot -> { userId, canvas, player }
 const available = new Map(); // slot -> { userId, config }
 const watching = new Set(); // slots que eu pedi para assistir
 
+// Estado de assinatura (fix Bug 4): entre pedir para assistir e o config/primeiro
+// quadro chegarem, a UI mostra "Conectando" — nunca de volta o botão "Ver minha
+// tela". O timer existe para dizer, sem cancelar, que o vídeo está demorando.
+const watchTimers = new Map(); // slot -> setTimeout
+const noConfigSlots = new Set(); // slots em que o config demorou demais (5s)
+
 let sdk = null;
 let session = null;
 let clientId = null;
@@ -124,21 +130,48 @@ function initials(name) {
 const slotOf = (userId) =>
   [...available.entries()].find(([, a]) => a.userId === userId)?.[0] ?? null;
 
+function scheduleWatchTimer(slot) {
+  clearWatchTimer(slot);
+  watchTimers.set(
+    slot,
+    setTimeout(() => {
+      watchTimers.delete(slot);
+      noConfigSlots.add(slot);
+      renderGrid();
+    }, 5000)
+  );
+}
+
+function clearWatchTimer(slot) {
+  const t = watchTimers.get(slot);
+  if (t) {
+    clearTimeout(t);
+    watchTimers.delete(slot);
+  }
+  noConfigSlots.delete(slot);
+}
+
 function watchSlot(slot) {
   const info = available.get(slot);
   if (!info) return;
+  console.debug('[viewer] watch-request', { slot });
   watching.add(slot);
   ws?.send(JSON.stringify({ type: 'watch', slot }));
   // O config pode já ter chegado; se não, ele chega logo e dispara o start.
+  // Enquanto isso a UI mostra "Conectando" (fix Bug 4).
   if (info.config) {
+    clearWatchTimer(slot);
     openStream(slot, info.userId);
     startStream(slot, info.config);
+  } else {
+    scheduleWatchTimer(slot);
   }
   renderGrid();
 }
 
 function unwatchSlot(slot) {
   watching.delete(slot);
+  clearWatchTimer(slot);
   ws?.send(JSON.stringify({ type: 'unwatch', slot }));
   closeStream(slot);
   renderGrid();
@@ -366,7 +399,7 @@ function buildTile(p, { palco = false, semVideo = false } = {}) {
     renderGrid();
   };
 
-  if (stream) {
+if (stream) {
     tile.append(stream.canvas);
     tile.title = palco
       ? telaCheia
@@ -397,6 +430,10 @@ function buildTile(p, { palco = false, semVideo = false } = {}) {
       unwatchSlot(slot);
     });
     tile.append(stop);
+  } else if (slot !== null && watching.has(slot)) {
+    // Já pedi para assistir e o vídeo ainda não chegou (fix Bug 4): mostra
+    // "Conectando", nunca de volta o botão "Ver minha tela".
+    tile.append(buildConnecting(slot));
   } else if (slot !== null) {
     // O convite tem botão próprio, que para o clique antes de chegar no tile.
     if (!palco) tile.addEventListener('click', aoClicar);
@@ -437,6 +474,25 @@ function buildLoading() {
   wrap.className = 'tile-loading';
   wrap.innerHTML = '<span class="spinner"></span>';
   wrap.append(document.createTextNode('Conectando…'));
+  return wrap;
+}
+
+/**
+ * Espera pela assinatura (fix Bug 4): já pedi para assistir, mas o config ainda
+ * não chegou para montar o decoder. Depois de 5s sem config, o texto explica o
+ * que está acontecendo — sem cancelar a assinatura sozinho.
+ */
+function buildConnecting(slot) {
+  const wrap = document.createElement('div');
+  wrap.className = 'watch-prompt connecting';
+  wrap.innerHTML = '<span class="spinner"></span>';
+  const msg = noConfigSlots.has(slot)
+    ? 'A transmissão foi anunciada, mas ainda não recebemos vídeo do transmissor.'
+    : 'Conectando à transmissão…';
+  const text = document.createElement('span');
+  text.className = 'watch-who';
+  text.textContent = msg;
+  wrap.append(text);
   return wrap;
 }
 
@@ -776,6 +832,7 @@ function openStream(slot, userId) {
     player: createPlayer(canvas, {
       onError: (m) => toast(m, true),
       onTamanho: () => {
+        if (!s.started) console.debug('[viewer] first-frame-rendered', { slot });
         s.started = true;
         renderGrid();
       },
@@ -1495,7 +1552,11 @@ function connect() {
     // para qual decodificador — som e imagem dividem o mesmo canal.
     if (typeof e.data !== 'string') {
       const view = new DataView(e.data);
-      const s = streams.get(view.getUint8(0));
+      const slot = view.getUint8(0);
+      // Diagnóstico (fix Bug 5): o espectador precisa saber que o ponto de
+      // partida chegou — é o que faz o decoder sair do "conectando".
+      if (view.getUint8(1) === 1) console.debug('[viewer] keyframe-received', { slot });
+      const s = streams.get(slot);
       if (!s) return;
       if (view.getUint8(1) === 3) s.audio?.push(e.data);
       else s.player.push(e.data);
@@ -1522,7 +1583,12 @@ function connect() {
       }
       for (const slot of [...available.keys()]) if (!live.has(slot)) available.delete(slot);
       for (const slot of [...streams.keys()]) if (!live.has(slot)) closeStream(slot);
-      for (const slot of [...watching]) if (!live.has(slot)) watching.delete(slot);
+      for (const slot of [...watching]) {
+        if (!live.has(slot)) {
+          watching.delete(slot);
+          clearWatchTimer(slot);
+        }
+      }
       renderGrid();
       renderBar();
     } else if (msg.type === 'stream-start') {
@@ -1534,7 +1600,9 @@ function connect() {
     } else if (msg.type === 'config') {
       const info = available.get(msg.slot);
       if (info) info.config = msg.config;
+      console.debug('[viewer] config-received', { slot: msg.slot, codec: msg.config?.codec });
       if (watching.has(msg.slot)) {
+        clearWatchTimer(msg.slot);
         openStream(msg.slot, info?.userId ?? msg.slot);
         startStream(msg.slot, msg.config);
       }
@@ -1545,6 +1613,7 @@ function connect() {
     } else if (msg.type === 'stream-stop') {
       available.delete(msg.slot);
       watching.delete(msg.slot);
+      clearWatchTimer(msg.slot);
       endStream(msg.slot);
     } else if (msg.type === 'room-gone') {
       roomTokens = null;
@@ -1764,10 +1833,12 @@ async function broadcastFromHere() {
   try {
     await b.start();
     myBroadcast = b;
+    console.debug('[activity] broadcast-ready', { phase: b.getPhase() });
     closeModal();
     renderBar();
     return true;
   } catch (err) {
+    console.debug('[activity] broadcast-failed', { name: err?.name, message: err?.message });
     const showedPicker = performance.now() - startedAt > 250;
     if (err.name === 'NotAllowedError' && showedPicker) {
       closeModal();

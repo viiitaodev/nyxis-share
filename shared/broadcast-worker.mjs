@@ -9,8 +9,17 @@
  * preview.
  *
  * Transferência: a main thread chama getDisplayMedia (permissão + gesto do
- * usuário) e transfere o MediaStreamTrack para cá com postMessage(track,[track]).
- * O MediaStreamTrackProcessor funciona dentro do worker em Chromium.
+ * usuário) e transfere um CLONE do MediaStreamTrack para cá com
+ * postMessage(track,[track]). O original fica na main thread (preview/fallback)
+ * — falhar aqui nunca destrói a captura escolhida pelo usuário.
+ *
+ * Handshake explícito (fix do race de init):
+ *   main  → { type:'init' }
+ *   worker → { type:'initialized' }   (config + socket + encoder prontos)
+ *   main  → { type:'track', track }   (clone transferido)
+ *   worker → { type:'capture-pumping' } → { type:'first-frame' } → { type:'stream-ready' }
+ * O worker TAMBÉM aceita o track antes do init terminar: ele fica pendente e o
+ * pump começa assim que o init completa — nunca há corrida entre mensagens.
  *
  * Sem DOM: resize usa OffscreenCanvas (nunca canvas de documento). A lógica de
  * gargalo (bottleneck) e adaptive bitrate são módulos puros compartilhados.
@@ -58,6 +67,12 @@ let stageCtx = null;
 let hint = null;
 let mode = 'auto';
 let running = false;
+let initDone = false;
+let ended = false;
+let serverStarted = false;
+let firstFrameSubmitted = false;
+let pendingTrack = null;
+let pendingAudioTrack = null;
 let mySlot = 0;
 let wantKeyframe = true;
 let lastKeyframeAt = 0;
@@ -154,77 +169,25 @@ async function init({ wsUrl, bitrate: br, fps: f, audio, mode: m, contentHint, d
   });
   encoder.configure(config);
 
-  ws.send(JSON.stringify({ type: 'start' }));
-
-  running = true;
-  wantKeyframe = true;
-  lastKeyframeAt = 0;
-  srcW = 0;
-  srcH = 0;
-  startedAt = Date.now();
-
   t.capturePath = 'direct';
   t.hardwareAcceleration = config.hardwareAcceleration ?? 'requested';
 
-  tel = { captured: 0, submitted: 0, encoded: 0, dropped: 0, keyframes: 0 };
-  windowStartAt = performance.now();
   emitStatus();
+  initDone = true;
+  post({ type: 'initialized' });
 
-  statsTimer = setInterval(() => {
-    const nowPerf = performance.now();
-    const dt = (nowPerf - windowStartAt) / 1000;
-    const now = Date.now();
-    const actualMbps = (bytes * 8) / 1e6;
-    const sample = {
-      viewers,
-      captureFps: dt > 0 ? Math.round(tel.captured / dt) : 0,
-      submittedFps: dt > 0 ? Math.round(tel.submitted / dt) : 0,
-      encodedFps: dt > 0 ? Math.round(tel.encoded / dt) : 0,
-      encoderQueueSize: encoder?.encodeQueueSize ?? 0,
-      droppedBeforeEncode: tel.dropped,
-      actualMbps: Number(actualMbps.toFixed(2)),
-      targetBitrate: adaptive.initialBitrate,
-      currentBitrate: adaptive.currentBitrate,
-      targetFps: fps,
-      codec: config.codec,
-      resolution: `${config.width}x${config.height}`,
-      contentHint: t.contentHintReal ?? hint ?? 'none',
-      hardwareAcceleration: t.hardwareAcceleration,
-      bufferedAmount: ws?.bufferedAmount ?? 0,
-      transport: t.transport,
-      keyframes: tel.keyframes,
-      mode,
-      seconds: Math.floor((now - startedAt) / 1000),
-      feedback,
-      probingSummary: t.probingSummary,
-      displaySurface: t.displaySurface,
-      trackReportedFps: t.trackReportedFps,
-      captureWidth: t.captureWidth,
-      captureHeight: t.captureHeight,
-      documentVisibility: t.documentVisibility,
-      previewActive: t.previewActive,
-      workerPipeline: true,
-      captureFrameIntervalMs: t.captureFrameIntervalMs,
-    };
-    sample.bottleneck = identifyBottleneck(sample, config?.framerate ?? fps);
-    if (bottleneckIsCaptureStarved(sample, config?.framerate ?? fps)) {
-      sample.bottleneck = 'CAPTURE STARVED';
-    }
-    lastTelemetry = sample;
-    post({ type: 'stats', stats: sample });
-    adaptive.onTick(sample);
-
-    tel.captured = 0;
-    tel.submitted = 0;
-    tel.encoded = 0;
-    tel.dropped = 0;
-    tel.keyframes = 0;
-    bytes = 0;
-    frames = 0;
-    windowStartAt = nowPerf;
-  }, 1000);
-
-  post({ type: 'ready' });
+  // Track/áudio que chegaram enquanto o init ainda rodava: a partir daqui o
+  // pipeline arranca — sem corrida entre mensagens.
+  if (pendingTrack) {
+    const tr = pendingTrack;
+    pendingTrack = null;
+    setVideoTrack(tr);
+  }
+  if (pendingAudioTrack) {
+    const a = pendingAudioTrack;
+    pendingAudioTrack = null;
+    setAudioTrack(a);
+  }
 }
 
 // ------------------------------------------------------------------ capture
@@ -247,8 +210,105 @@ function setVideoTrack(track) {
   }
 
   track.addEventListener('ended', () => stop('Você parou o compartilhamento pelo navegador.'));
-  reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+
+  // Chegou antes do init terminar: guarda e o init arranca depois (handshake).
+  if (!initDone) {
+    pendingTrack = track;
+    return;
+  }
+
+  // Troca de tela no ar: a leitura anterior morre e recomeça da fonte nova.
+  if (running && reader) {
+    reader.cancel().catch(() => {});
+    reader = null;
+    srcW = 0;
+    srcH = 0;
+    wantKeyframe = true;
+  }
+  startPump();
+}
+
+function startPump() {
+  if (!videoTrack) return;
+
+  if (!running) {
+    running = true;
+    wantKeyframe = true;
+    lastKeyframeAt = 0;
+    startedAt = Date.now();
+    tel = { captured: 0, submitted: 0, encoded: 0, dropped: 0, keyframes: 0 };
+    windowStartAt = performance.now();
+    statsTimer = setInterval(tickStats, 1000);
+  }
+
+  try {
+    reader = new MediaStreamTrackProcessor({ track: videoTrack }).readable.getReader();
+  } catch (err) {
+    stop(`Falha ao ler a captura: ${err.message}`);
+    return;
+  }
+  post({ type: 'capture-pumping' });
   pumpLoop();
+  if (pendingAudioTrack) {
+    const a = pendingAudioTrack;
+    pendingAudioTrack = null;
+    setAudioTrack(a);
+  }
+  emitStatus();
+}
+
+function tickStats() {
+  const nowPerf = performance.now();
+  const dt = (nowPerf - windowStartAt) / 1000;
+  const now = Date.now();
+  const actualMbps = (bytes * 8) / 1e6;
+  const sample = {
+    viewers,
+    captureFps: dt > 0 ? Math.round(tel.captured / dt) : 0,
+    submittedFps: dt > 0 ? Math.round(tel.submitted / dt) : 0,
+    encodedFps: dt > 0 ? Math.round(tel.encoded / dt) : 0,
+    encoderQueueSize: encoder?.encodeQueueSize ?? 0,
+    droppedBeforeEncode: tel.dropped,
+    actualMbps: Number(actualMbps.toFixed(2)),
+    targetBitrate: adaptive.initialBitrate,
+    currentBitrate: adaptive.currentBitrate,
+    targetFps: fps,
+    codec: config.codec,
+    resolution: `${config.width}x${config.height}`,
+    contentHint: t.contentHintReal ?? hint ?? 'none',
+    hardwareAcceleration: t.hardwareAcceleration,
+    bufferedAmount: ws?.bufferedAmount ?? 0,
+    transport: t.transport,
+    keyframes: tel.keyframes,
+    mode,
+    seconds: Math.floor((now - startedAt) / 1000),
+    feedback,
+    probingSummary: t.probingSummary,
+    displaySurface: t.displaySurface,
+    trackReportedFps: t.trackReportedFps,
+    captureWidth: t.captureWidth,
+    captureHeight: t.captureHeight,
+    documentVisibility: t.documentVisibility,
+    previewActive: t.previewActive,
+    workerPipeline: true,
+    captureFrameIntervalMs: t.captureFrameIntervalMs,
+  };
+  sample.bottleneck = identifyBottleneck(sample, config?.framerate ?? fps);
+  if (bottleneckIsCaptureStarved(sample, config?.framerate ?? fps)) {
+    sample.bottleneck = 'CAPTURE STARVED';
+  }
+  lastTelemetry = sample;
+  post({ type: 'stats', stats: sample });
+  adaptive.onTick(sample);
+
+  tel.captured = 0;
+  tel.submitted = 0;
+  tel.encoded = 0;
+  tel.dropped = 0;
+  tel.keyframes = 0;
+  bytes = 0;
+  frames = 0;
+  windowStartAt = nowPerf;
 }
 
 async function pumpLoop() {
@@ -291,6 +351,11 @@ function encodeFrame(frame) {
     stageCtx.drawImage(frame, 0, 0, stage.width, stage.height);
     frame.close();
     out = new VideoFrame(stage, { timestamp });
+  }
+
+  if (!firstFrameSubmitted) {
+    firstFrameSubmitted = true;
+    post({ type: 'first-frame' });
   }
 
   tel.submitted++;
@@ -361,8 +426,15 @@ function onEncoded(chunk, metadata) {
   if (ws?.readyState !== WebSocket.OPEN) return;
   tel.encoded++;
 
+  // Bug 3: o servidor só recebe 'start' quando existe pipeline utilizável —
+  // primeiro o decoderConfig real, depois o anúncio. Nada de "no ar" sem mídia.
   if (metadata?.decoderConfig) {
     ws.send(JSON.stringify({ type: 'config', config: serializeConfig(metadata.decoderConfig) }));
+    if (!serverStarted) {
+      serverStarted = true;
+      ws.send(JSON.stringify({ type: 'start' }));
+      post({ type: 'stream-ready' });
+    }
   }
 
   const data = new Uint8Array(chunk.byteLength);
@@ -404,6 +476,15 @@ function serializeConfig(dc) {
 
 function setAudioTrack(track) {
   if (!track) return;
+  if (!running) {
+    pendingAudioTrack = track;
+    return;
+  }
+  configureAudio(track);
+  pumpAudioLoop();
+}
+
+function configureAudio(track) {
   const s = track.getSettings();
   const sampleRate = s.sampleRate || 48_000;
   const numberOfChannels = Math.min(2, s.channelCount || 2);
@@ -422,7 +503,6 @@ function setAudioTrack(track) {
     JSON.stringify({ type: 'audio-config', config: { codec: 'opus', sampleRate, numberOfChannels } })
   );
   audioReader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-  pumpAudioLoop();
 }
 
 async function pumpAudioLoop() {
@@ -561,7 +641,12 @@ function stop(reason) {
   }
   ws = null;
 
-  if (wasRunning) post({ type: 'end', reason: reason ?? '' });
+  // Sempre avisa o fim (mesmo antes de 'running'): quem estiver aguardando
+  // 'initialized'/'stream-ready' precisa sair do await.
+  if (!ended) {
+    ended = true;
+    post({ type: 'end', reason: reason ?? '' });
+  }
 }
 
 // ----------------------------------------------------------- message in
@@ -580,6 +665,20 @@ self.onmessage = async (e) => {
       break;
     case 'track':
       setVideoTrack(msg.track);
+      break;
+    case 'probe':
+      // Teste de transferibilidade: a main envia um track descartável (canvas).
+      // Se ele chegar utilizável (live), o navegador suporta transferir track.
+      if (msg.track?.readyState === 'live') {
+        try {
+          msg.track.getSettings();
+          post({ type: 'probe-ok' });
+        } catch {
+          post({ type: 'probe-fail' });
+        }
+      } else {
+        post({ type: 'probe-fail' });
+      }
       break;
     case 'audioTrack':
       if (msg.somBloqueado) setSomBloqueado(true);

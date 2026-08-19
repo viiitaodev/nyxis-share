@@ -117,6 +117,27 @@ function applyPresets() {
   const modoLabel = { auto: 'Auto', motion: 'Jogos', game: 'Jogos', text: 'Texto' }[$('mode').value];
   $('presetLine').textContent = `${modoLabel} · ${mbps} Mb/s · ${$('fps').value} fps${comSom}`;
   $('presetLine').hidden = false;
+  $('presetHint').hidden = false;
+  // A página é só o companion de captura: a configuração foi decidida na
+  // atividade (activity-first). Esconde os controles que sobrariam.
+  document.querySelector('#setup .check')?.remove();
+  document.querySelector('#setup .note')?.remove();
+  $('start').textContent = 'Escolher o que compartilhar';
+}
+
+const ROTULO_FASE = {
+  INITIALIZING: 'Iniciando…',
+  CAPTURE_ACQUIRED: 'Captura escolhida',
+  TRANSPORT_CONNECTED: 'Conectando ao servidor…',
+  ENCODER_READY: 'Codificador pronto',
+  CAPTURE_PUMPING: 'Lendo a tela…',
+  FIRST_FRAME_SUBMITTED: 'Primeiro quadro enviado ao codificador',
+  FIRST_FRAME_ENCODED: 'Primeiro quadro codificado',
+  STREAM_READY: 'No ar',
+};
+
+function faseLegivel(phase) {
+  return phase ? ROTULO_FASE[phase] ?? phase : '';
 }
 
 // -------------------------------------------------------------------- ações
@@ -166,6 +187,7 @@ function renderDetails(s) {
     ['Preview local', s.previewActive ? 'ON' : 'OFF'],
     ['Transport', s.transport],
     ['Gargalo', s.bottleneck ?? '—'],
+    ['Fase', faseLegivel(s.phase)],
   ];
   list.replaceChildren(
     ...rows.map(([k, v]) => {
@@ -196,15 +218,21 @@ async function start() {
     $('previewOn').checked = false;
   }
 
+  console.debug('[share] start', { bitrate: Number($('quality').value), fps: Number($('fps').value), mode: modeSel });
+
   broadcaster = createBroadcaster({
     wsUrl: `${proto}://${location.host}/ws?t=${encodeURIComponent(token)}`,
     bitrate: Number($('quality').value),
     fps: Number($('fps').value),
     audio: $('withAudio').checked,
-    mode: $('mode')?.value ?? 'auto',    onStatus: (s) =>
+    mode: $('mode')?.value ?? 'auto',
+    onPhase: (p) => console.debug('[share] phase', p),
+    onStatus: (s) => {
       setStatus(
         `Codec: ${s.codec} · ${s.width}×${s.height} · captura ${s.direct ? 'direta' : 'via <video>'} · HW ${s.hardwareAcceleration}`
-      ),
+      );
+      $('phaseLine').textContent = faseLegivel(s.phase);
+    },
     onStats: (s) => {
       $('viewers').textContent = s.viewers;
       $('fpsOut').textContent = `${s.encodedFps} fps`;
@@ -228,6 +256,7 @@ async function start() {
       $('setup').hidden = false;
       $('start').disabled = false;
       setStatus(reason);
+      console.debug('[share] end', { reason });
     },
   });
 
@@ -240,13 +269,17 @@ async function start() {
     applyPreview();
     // Sincroniza o estado inicial de visibilidade com a telemetria.
     syncVisibility();
+    console.debug('[share] stream-ready', { phase: broadcaster.getPhase() });
   } catch (err) {
     broadcaster = null;
+    currentStream = null;
+    $('preview').srcObject = null;
     $('start').disabled = false;
     setStatus(
       err.name === 'NotAllowedError' ? 'Você cancelou a seleção de tela.' : err.message,
       'error'
     );
+    console.debug('[share] start-failed', { name: err?.name, message: err?.message });
   }
 }
 

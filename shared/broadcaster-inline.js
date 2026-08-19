@@ -13,6 +13,11 @@
 import { contentHintFor } from './broadcast-mode.mjs';
 import { createAdaptiveController } from './adaptive.mjs';
 import { identifyBottleneck } from './bottleneck.mjs';
+import { PHASES } from './lifecycle.mjs';
+
+// Quanto tempo a pipeline inline pode levar até produzir o primeiro chunk
+// codificado (stream-ready). Depois disso é erro real, não espera.
+const STREAM_READY_TIMEOUT_MS = 15_000;
 
 // H264 costuma ter encoder por hardware; VP8 quase sempre cai em software, que
 // a 1080p derruba o framerate. Por isso as duas variantes de H264 vêm antes:
@@ -87,6 +92,8 @@ export function supportError({ requireChromium = false } = {}) {
  * @param {(reason:string)=>void} [opts.onEnd]   encerrou (por qualquer motivo)
  * @param {(msg:string)=>void} [opts.onAviso]    algo mudou sem ser erro
  * @param {(msg:string)=>void} [opts.onError]
+ * @param {(phase:string)=>void} [opts.onPhase]  ciclo de vida da transmissão
+ * @param {MediaStream} [opts.stream]            stream já adquirido pela fachada
  */
 export function createInlineBroadcaster({
   wsUrl,
@@ -100,9 +107,13 @@ export function createInlineBroadcaster({
   onEnd,
   onError,
   onAviso,
+  onPhase,
+  // Stream já adquirido pela fachada (fallback do worker). Quando presente, o
+  // inline NÃO re-pede a tela — reutiliza o que já foi escolhido pelo usuário.
+  stream: fornecido = null,
 }) {
   let ws = null;
-  let stream = null;
+  let stream = fornecido;
   let encoder = null;
   let reader = null;
   let audioEncoder = null;
@@ -114,6 +125,10 @@ export function createInlineBroadcaster({
   let config = null;
   let stage = null;
   let stageCtx = null;
+  // O servidor só recebe 'start' quando a pipeline já produz mídia (fix Bug 3).
+  let serverStarted = false;
+  let firstFrameSubmitted = false;
+  let readyResolve = null;
 
   // contentHint efetivo, decidido pelo modo quando não foi forçado.
   const hint = contentHint || contentHintFor(mode);
@@ -192,13 +207,17 @@ export function createInlineBroadcaster({
 
   async function start() {
     // Precisa vir do gesto do usuário; qualquer await antes disso o invalida.
-    stream = await navigator.mediaDevices.getDisplayMedia({
+    // Quando a fachada já adquiriu o stream (fallback do worker), reutiliza-o
+    // sem abrir o seletor de novo.
+    if (!stream) {
+      stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: fps, max: fps } },
       // systemAudio: 'include' pede o som do computador em vez de só o da aba.
       // Os tratamentos de voz ficam desligados: eles existem para microfone e,
       // em som de aplicativo, cortam justamente o que se queria ouvir.
       audio: audio ? audioConstraints() : false,
     });
+    }
 
     const track = stream.getVideoTracks()[0];
     // Diz ao encoder o tipo de conteúdo: 'text' preserva nitidez de UI,
@@ -229,14 +248,14 @@ export function createInlineBroadcaster({
     }
 
     await connect();
+    onPhase?.(PHASES.TRANSPORT_CONNECTED);
 
     encoder = new VideoEncoder({
       output: onEncoded,
       error: (err) => stop(`Erro no encoder: ${err.message}`),
     });
     encoder.configure(config);
-
-    ws.send(JSON.stringify({ type: 'start' }));
+    onPhase?.(PHASES.ENCODER_READY);
 
     running = true;
     wantKeyframe = true;
@@ -251,6 +270,9 @@ export function createInlineBroadcaster({
     tel = { captured: 0, submitted: 0, encoded: 0, dropped: 0, keyframes: 0 };
     windowStartAt = performance.now();
     emitStatus();
+
+    // O servidor NÃO é anunciado aqui (sem mídia ainda). O 'start' só sai no
+    // primeiro decoderConfig, em onEncoded — junto do stream-ready (fix Bug 3).
 
     statsTimer = setInterval(() => {
       const nowPerf = performance.now();
@@ -316,6 +338,26 @@ export function createInlineBroadcaster({
     // o som" fica desmarcada, e o navegador devolve a tela sem faixa de som.
     const audioTrack = prepararSom(track, stream);
     if (audioTrack) pumpAudio(audioTrack);
+
+    // A transmissão só está pronta quando o primeiro chunk foi codificado e a
+    // config enviada ao servidor (stream-ready) — até lá não há mídia real.
+    const ready = new Promise((resolve) => {
+      readyResolve = resolve;
+    });
+    try {
+      await Promise.race([
+        ready,
+        new Promise((_, reject) =>
+          setTimeout(
+            () => reject(new Error('A transmissão não começou a produzir vídeo. Tente de novo.')),
+            STREAM_READY_TIMEOUT_MS
+          )
+        ),
+      ]);
+    } catch (err) {
+      stop(err.message);
+      throw err;
+    }
 
     return stream;
   }
@@ -557,6 +599,7 @@ export function createInlineBroadcaster({
   /** Chromium: acesso direto aos quadros, sem cópia intermediária. */
   async function pumpDirect(track) {
     reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    onPhase?.(PHASES.CAPTURE_PUMPING);
     while (running) {
       let frame;
       try {
@@ -576,6 +619,7 @@ export function createInlineBroadcaster({
     video.muted = true;
     video.playsInline = true;
     video.srcObject = stream;
+    onPhase?.(PHASES.CAPTURE_PUMPING);
     // Fora do fluxo mas no DOM: alguns navegadores não decodificam um elemento
     // solto, e display:none chega a pausar a reprodução.
     Object.assign(video.style, {
@@ -657,6 +701,10 @@ export function createInlineBroadcaster({
     }
 
     // submittedFrames: encoder.encode chamado com sucesso.
+    if (!firstFrameSubmitted) {
+      firstFrameSubmitted = true;
+      onPhase?.(PHASES.FIRST_FRAME_SUBMITTED);
+    }
     tel.submitted++;
     try {
       encoder.encode(out, { keyFrame: wantKeyframe });
@@ -752,8 +800,18 @@ export function createInlineBroadcaster({
     tel.encoded++;
 
     // O decoderConfig chega no primeiro chunk e sempre que a config muda.
+    // O 'start' do servidor só sai junto do PRIMEIRO decoderConfig: a partir
+    // daí a pipeline produz mídia de verdade (fix Bug 3).
     if (metadata?.decoderConfig) {
       ws.send(JSON.stringify({ type: 'config', config: serializeConfig(metadata.decoderConfig) }));
+      if (!serverStarted) {
+        serverStarted = true;
+        ws.send(JSON.stringify({ type: 'start' }));
+        onPhase?.(PHASES.FIRST_FRAME_ENCODED);
+        onPhase?.(PHASES.STREAM_READY);
+        readyResolve?.();
+        readyResolve = null;
+      }
     }
 
     const data = new Uint8Array(chunk.byteLength);

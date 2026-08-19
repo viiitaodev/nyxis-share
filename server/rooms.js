@@ -317,6 +317,7 @@ export function broadcastState(room) {
 }
 
 function requestKeyframe(entry) {
+  console.log(`[broadcaster] need-keyframe slot=${entry.slot}`);
   sendJson(entry.ws, { type: 'need-keyframe' });
 }
 
@@ -363,9 +364,10 @@ export function attachBroadcaster(room, ws, info) {
 }
 
 export function startStream(room, entry) {
+  // O transmissor só manda 'start' depois de ter config + primeiro chunk
+  // (pipeline utilizável) — então NÃO zera config/audioConfig aqui: eles já
+  // chegaram e quem começar a assistir agora precisa deles. (fix Bug 3)
   entry.streaming = true;
-  entry.config = null;
-  entry.audioConfig = null;
   // Transmissão nova recomeça do zero: ninguém assiste até pedir.
   for (const v of room.viewers) {
     v.__primed?.delete(entry.slot);
@@ -481,6 +483,7 @@ export function watch(room, ws, slot) {
   // sala inteira — um cliente em laço faria o servidor inundar todo mundo.
   if (ws.__watching.has(slot)) return;
 
+  console.log(`[room] watch viewer=${ws.__info?.id ?? '?'} slot=${slot} config=${Boolean(entry.config)}`);
   ws.__watching.add(slot);
   ws.__primed.delete(slot);
 
