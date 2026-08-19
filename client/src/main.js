@@ -78,6 +78,7 @@ let volumeAntes = volume || 1;
 // de quem assiste precisa sobreviver a isso.
 let activeSlot = null;
 let telaCheia = false;
+let controlesRecolhidos = read('controlesRecolhidos') === '1';
 
 // ------------------------------------------------------------------- helpers
 
@@ -240,6 +241,8 @@ function renderGrid() {
   if (!inRoom()) {
     $('app').classList.remove('controles-na-lateral');
     $('app').classList.remove('controles-no-canto');
+    $('app').classList.remove('controles-recolhidos');
+    $('controlsCollapse').hidden = true;
     grid.hidden = true;
     $('empty').hidden = true;
     $('fullscreen').hidden = true;
@@ -284,6 +287,12 @@ function renderGrid() {
   // no DOM principal e só mudam de lugar por CSS, para não perder eventos.
   $('app').classList.toggle('controles-na-lateral', noPalco);
   $('app').classList.toggle('controles-no-canto', noPalco && telaCheia);
+  $('app').classList.toggle('controles-recolhidos', noPalco && controlesRecolhidos);
+  $('controlsCollapse').hidden = !noPalco;
+  $('controlsCollapse').setAttribute('aria-expanded', String(!controlesRecolhidos));
+  const textoRecolher = controlesRecolhidos ? 'Mostrar controles' : 'Recolher controles';
+  $('controlsCollapse').dataset.tip = textoRecolher;
+  $('controlsCollapse').setAttribute('aria-label', textoRecolher);
 
   // Com a lateral no ar, a contagem no topo repete o que está logo ali — e
   // custa uma faixa inteira de altura, que é o que falta para a tela. Vazia, a
@@ -435,8 +444,11 @@ function buildTile(p, { palco = false, semVideo = false, slot: slotDado = null }
   }
 
   const aoClicar = () => {
-    if (palco) telaCheia = !telaCheia;
-    else activeSlot = slot;
+    if (palco) {
+      alternarTelaCheia();
+      return;
+    }
+    activeSlot = slot;
     renderGrid();
   };
 
@@ -2105,9 +2117,42 @@ $('settings').addEventListener('click', () => {
 
 // O estado visual do botão é decidido por renderGrid, que é quem sabe se há
 // tela no palco — aqui só se troca a intenção.
-$('fullscreen').addEventListener('click', () => {
+async function alternarTelaCheia() {
   if (activeSlot === null) return;
-  telaCheia = !telaCheia;
+
+  const entrando = !telaCheia;
+  telaCheia = entrando;
+  renderGrid();
+
+  // Dentro do Discord a política do iframe pode negar fullscreen. O palco em
+  // foco continua funcionando nesse caso; fora dele, ocupamos a janela toda.
+  if (entrando && !document.fullscreenElement) {
+    try {
+      await $('app').requestFullscreen?.();
+    } catch {
+      toast('O Discord manteve a Activity na janela; o modo de foco continua ativo.');
+    }
+  } else if (!entrando && document.fullscreenElement) {
+    try {
+      await document.exitFullscreen();
+    } catch {}
+  }
+}
+
+$('fullscreen').addEventListener('click', alternarTelaCheia);
+
+document.addEventListener('fullscreenchange', () => {
+  // Esc do navegador sai da Fullscreen API. Espelhar também no palco interno
+  // evita ficar sem lateral nem um botão coerente para voltar.
+  if (!document.fullscreenElement && telaCheia) {
+    telaCheia = false;
+    renderGrid();
+  }
+});
+
+$('controlsCollapse').addEventListener('click', () => {
+  controlesRecolhidos = !controlesRecolhidos;
+  store('controlesRecolhidos', controlesRecolhidos ? '1' : '0');
   renderGrid();
 });
 
@@ -2124,8 +2169,7 @@ window.addEventListener('keydown', (e) => {
 
   // Esc sai da tela cheia — é o reflexo de todo mundo.
   if (telaCheia) {
-    telaCheia = false;
-    renderGrid();
+    alternarTelaCheia();
   }
 });
 
