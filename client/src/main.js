@@ -268,7 +268,13 @@ function renderGrid() {
   $('fullscreen').dataset.tip = rotulo;
   $('fullscreen').setAttribute('aria-label', rotulo);
 
-  if (!hasPeople) return;
+  // Pode acontecer de a última pessoa sair enquanto o palco ainda está
+  // montado. Nesse caso a barra não pode manter a posição absoluta da lateral
+  // de uma sala que já não existe.
+  if (!hasPeople) {
+    $('app').classList.remove('controles-na-lateral');
+    return;
+  }
 
   grid.classList.toggle('palco', noPalco);
   grid.classList.toggle('cheia', noPalco && telaCheia);
