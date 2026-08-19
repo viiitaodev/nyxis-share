@@ -17,10 +17,7 @@
     "start": "npm run build && npm -w server run start",
     "start:fast": "node scripts/start-fast.mjs",
     "build": "npm -w client run build",
-    "smoke": "node scripts/smoke.mjs",
-    "test": "node shared/protocol/h264.test.mjs && node server/ingest/session.test.mjs",
-    "sender": "node apps/sender/src/index.mjs",
-    "sender:probe": "node apps/sender/src/index.mjs --probe"
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

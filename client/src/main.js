@@ -416,13 +416,6 @@ function buildTile(p, { palco = false, semVideo = false } = {}) {
     badge.append(dot);
   }
   badge.append(document.createTextNode(p.name));
-  // Origem do stream: o modo nativo marca `source: 'native'` no config.
-  if (slot !== null && available.get(slot)?.config?.source === 'native') {
-    const src = document.createElement('span');
-    src.className = 'tile-src';
-    src.textContent = 'Sender';
-    badge.append(src);
-  }
   footer.append(badge);
 
   if (slot !== null) footer.append(buildWatchers(slot));
@@ -1609,10 +1602,6 @@ $('share').addEventListener('click', () => {
  * já vêm com os valores atuais e o botão aplica em vez de iniciar.
  */
 let modalMode = 'start';
-// 'rapido' (browser) ou 'nativo' (Nyxis Share Sender). O modo vive só no
-// modal: é preferência do momento, não estado persistido.
-let shareMode = 'rapido';
-let lastNativeLink = null;
 
 function openModal(mode) {
   modalMode = mode;
@@ -1621,7 +1610,7 @@ function openModal(mode) {
   $('modalTitle').textContent = live ? 'Ajustes da transmissão' : 'Compartilhar sua tela';
   $('modalSub').textContent = live
     ? 'Vale na hora, sem derrubar quem está assistindo.'
-    : 'Escolha como quer compartilhar.';
+    : 'Escolha a tela e comece a transmitir.';
   $('modalGo').textContent = live ? 'Aplicar' : 'Compartilhar tela';
   $('modalSwap').hidden = !live;
   $('modalNote').hidden = live;
@@ -1637,107 +1626,11 @@ function openModal(mode) {
     $('mFps').value = String(s.fps);
   }
 
-  // Modo de compartilhamento só faz sentido na hora de começar; ao ajustar uma
-  // transmissão já no ar, o modo é sempre o browser.
-  shareMode = 'rapido';
-  applyShareMode();
-
-  $('modal').hidden = false;
-}
-
-/** Alterna os campos do modal entre os dois modos de compartilhamento. */
-function applyShareMode() {
-  const nativo = shareMode === 'nativo';
-  $('modeRapido').classList.toggle('on', !nativo);
-  $('modeNativo').classList.toggle('on', nativo);
-  $('quickFields').hidden = nativo;
-  $('nativeFields').hidden = !nativo;
-  $('modalGo').textContent = nativo ? 'Abrir no Sender' : 'Compartilhar tela';
-  $('nativeActions').hidden = true;
-  if (nativo && !$('nativeStatus').textContent) {
-    setNativeStatus('O Nyxis Share Sender captura a tela pelo Windows e publica em alta qualidade.');
-  }
-}
-
-function setNativeStatus(msg) {
-  $('nativeStatus').textContent = msg;
-  $('nativeStatus').hidden = !msg;
-}
-
-$('modeRapido').addEventListener('click', () => {
-  shareMode = 'rapido';
-  applyShareMode();
-});
-
-$('modeNativo').addEventListener('click', () => {
-  shareMode = 'nativo';
-  applyShareMode();
-});
-
-$('nativeBack').addEventListener('click', () => {
-  shareMode = 'rapido';
-  applyShareMode();
-});
-
-$('nativeCopy').addEventListener('click', async () => {
-  if (!lastNativeLink) return;
-  try {
-    await navigator.clipboard.writeText(lastNativeLink);
-    toast('Link copiado. Cole no Sender com --url ou na janela dele.');
-  } catch {
-    toast('Não foi possível copiar automaticamente.', true);
-  }
-});
-
-/**
- * Cria uma sessão de ingest nativa e entrega o link ao Nyxis Share Sender.
- *
- * O senderToken é efêmero (TTL curto, assinado) e o host vem do próprio
- * servidor — nada de secret permanente na URL. Depois do link gerado, a
- * transmissão aparece aqui como qualquer outra: o gateway entra na sala como
- * broadcaster da pessoa e o relay cuida do resto.
- */
-async function runNativeShare() {
-  const profile = $('nProfile').value;
-  let s;
-  try {
-    s = await post(`${P}/api/ingest/session`, {
-      identity: session.identity,
-      roomId: roomTokens.roomId,
-      roomToken: roomTokens.viewerToken,
-      profile,
-    });
-  } catch (err) {
-    toast(err.message, true);
-    return;
-  }
-
-  const deepLink = `nyxisshare://publish?session=${encodeURIComponent(s.senderToken)}&host=${encodeURIComponent(
-    s.server
-  )}`;
-  lastNativeLink = deepLink;
-
-  if (inDiscord) {
-    setNativeStatus('Link gerado. Abrindo o Nyxis Share Sender…');
-    $('nativeActions').hidden = false;
-    try {
-      const res = await sdk.commands.openExternalLink({ url: deepLink });
-      if (res?.opened === false) {
-        setNativeStatus('Você recusou abrir o link. Copie abaixo e cole no Sender.');
-      } else {
-        setNativeStatus('Sender aberto. A transmissão aparece aqui quando estiver no ar.');
-        closeModal();
-      }
-    } catch (err) {
-      setNativeStatus(`Não foi possível abrir o link: ${err.message}`);
-    }
-  } else {
-    $('nativeActions').hidden = false;
-setNativeStatus('Copie o link abaixo e cole no Nyxis Share Sender:');
-  }
+  $('modal').hidden = false;
 }
 
 $('liveSettings').addEventListener('click', () => openModal('live'));
+
 /** Espelha o volume atual no botão e no cursor, sem tocar no áudio. */
 function renderVolume() {
   const pct = Math.round(volume * 100);
@@ -1859,12 +1752,6 @@ $('modalGo').addEventListener('click', async () => {
       fps: Number($('mFps').value),
     });
     closeModal();
-    return;
-  }
-
-  // Modo nativo: o Sender faz a captura no Windows, o link leva a sessão até ele.
-  if (shareMode === 'nativo') {
-    await runNativeShare();
     return;
   }
 
