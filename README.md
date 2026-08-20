@@ -154,6 +154,27 @@ volume, ou clica nele para silenciar.
 
 ---
 
+## Modos de compartilhamento
+
+Ao clicar em **Compartilhar tela**, escolha o modo que combina com o conteúdo:
+
+- **Automático** — o padrão; comportamento equilibrado.
+- **Jogos / Movimento** — prioriza FPS e fluidez (`contentHint: motion`),
+  ideal para jogo e vídeo com movimento.
+- **Texto / Trabalho** — prioriza nitidez de texto e UI (`contentHint: text`).
+
+E a **Qualidade** (1080p/720p · 30/60 fps). O bitrate se adapta sozinho quando
+a rede ou o encoder ficam sob pressão, reduzindo primeiro e se recuperando aos
+poucos.
+
+**Detalhes da transmissão** (engrenagem, dentro da sala) mostra os números
+reais: resolução, capture FPS, encode FPS, render FPS, bitrate, codec,
+aceleração de hardware, fila do encoder, quadros descartados e o gargalo
+(`CAPTURE LIMITED`, `ENCODER LIMITED`, `NETWORK LIMITED`, `VIEWER LIMITED`) —
+sem maquiar FPS.
+
+---
+
 ## Deu errado?
 
 **A atividade não abre, ou fica só um retângulo branco**

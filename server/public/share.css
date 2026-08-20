@@ -34,7 +34,16 @@ body {
   background: var(--card);
   border: 1px solid var(--line);
   border-radius: 12px;
-  padding: 28px;
+  padding: 30px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.28);
+}
+
+.eyebrow, .setup-label {
+  margin: 0 0 5px;
+  color: #949cff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .08em;
 }
 
 h1 {
@@ -159,8 +168,12 @@ video {
 }
 
 .preset {
-  margin: 0 0 4px;
-  color: var(--muted);
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid rgba(88, 101, 242, .32);
+  border-radius: 8px;
+  background: rgba(88, 101, 242, .1);
+  color: #d9dcff;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
@@ -199,6 +212,85 @@ video {
   font-size: 12px;
 }
 
+/* As duas fontes lado a lado quando a janela deixa. Empilhadas, cada preview
+   empurra o outro para fora da tela — e é justamente com as duas no ar que se
+   precisa ver as duas. Abaixo do ponto de corte volta a ser uma coluna, que é
+   o que cabe. */
+.fontes {
+  margin-top: 18px;
+  display: grid;
+  gap: 24px;
+}
+
+@media (min-width: 900px) {
+  .fontes {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  /* Colunas da mesma altura, com a ação de cada uma encostada na base. Sem
+     isto o botão da tela desce sozinho — só ela tem a caixa de som — e as duas
+     ações, que são o mesmo gesto, ficam em alturas diferentes. */
+  .bloco {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .bloco > div {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* O espaço livre vai para cima da nota, e não para cima do botão: assim a
+     nota e a ação descem juntas, e as duas colunas terminam na mesma linha
+     mesmo quando só uma delas tem a caixa de som.
+
+     Um `margin-top: auto` só por coluna — dois dividiriam a sobra entre eles e
+     nada encostaria em lugar nenhum. Por isso a nota cobre o bloco parado e o
+     botão vermelho cobre o bloco no ar: cada um existe só no seu, então nunca
+     aparecem os dois juntos. */
+  .bloco > div > .note {
+    margin-top: auto;
+  }
+
+  .bloco > div > button.danger {
+    margin-top: auto;
+  }
+}
+
+/* Um bloco por fonte. A régua acima separa sem gastar altura, que é o que
+   falta numa página que agora tem dois controles em vez de um. */
+.bloco {
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #1e1f22;
+}
+
+.fonte-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fonte-chip { padding: 3px 7px; border-radius: 999px; background: #30323a; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .05em; }
+
+.bloco h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+
+/* O bloco da fonte pedida pela atividade, enquanto ela espera um clique daqui.
+   Sem isto o pedido chega e nada na página muda de aparência. */
+.bloco.chamando {
+  border-color: var(--accent, #5865f2);
+  box-shadow: 0 0 0 2px rgba(88, 101, 242, .18);
+}
+
+.bloco.chamando h2 {
+  opacity: 1;
+  color: var(--accent, #5865f2);
+}
+
 .status {
   margin: 16px 0 0;
   min-height: 20px;
@@ -235,4 +327,13 @@ footer p {
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 13px;
+}
+
+/* O cartão só alarga quando há duas colunas para preencher. Mantido estreito
+   abaixo disso: linha de texto longa demais é pior de ler, e em coluna única
+   não há nada para ocupar a largura extra. */
+@media (min-width: 900px) {
+  .card {
+    max-width: 940px;
+  }
 }

@@ -3,76 +3,91 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Compartilhar tela</title>
+    <title>Transmitir</title>
     <!-- ?v= existe porque share.js/css têm nome fixo. Quem abriu a página antes
          dos cabeçalhos no-store guardou a versão antiga por heurística do
          navegador, e continuaria usando ela para sempre. Trocar a query força
          uma URL nova. Incremente ao publicar mudanças nesses arquivos. -->
-    <link rel="stylesheet" href="/share.css?v=9" />
+    <link rel="stylesheet" href="/share.css?v=15" />
   </head>
   <body>
     <main class="card">
       <header>
-        <h1>Compartilhar tela</h1>
+        <h1>Compartilhar na call</h1>
         <p class="sub" id="roomLine">Carregando…</p>
       </header>
 
+      <!-- Erro que impede a página inteira: token inválido, navegador sem
+           suporte. Os erros de cada fonte ficam no bloco dela. -->
+      <p id="pageStatus" class="status" role="status"></p>
+
+      <!-- Só o resumo: qualidade, taxa e som são editados pela engrenagem da
+           atividade, que é de onde esta página é aberta. Os mesmos controles
+           nos dois lugares criavam duas fontes de verdade, e a daqui
+           envelhecia assim que alguém mexia na de lá. -->
       <section id="setup">
-        <div class="row">
-          <label for="quality">Qualidade</label>
-          <select id="quality">
-            <option value="1000000">Leve — 1 Mbps</option>
-            <option value="2500000" selected>Boa — 2,5 Mbps</option>
-            <option value="5000000">Alta — 5 Mbps</option>
-            <option value="8000000">Máxima — 8 Mbps</option>
-          </select>
-        </div>
-
-        <div class="row">
-          <label for="fps">Taxa de quadros</label>
-          <select id="fps">
-            <option value="15">15 fps — economiza banda</option>
-            <option value="30" selected>30 fps — mais fluido</option>
-            <option value="60">60 fps — jogo e vídeo, exija 5 Mbps ou mais</option>
-          </select>
-        </div>
-
-        <p id="presetLine" class="preset" hidden></p>
-
-        <label class="check">
-          <input id="withAudio" type="checkbox" />
-          <span>Compartilhar o som</span>
-        </label>
-
-        <p class="note">
-          Marque também "Compartilhar o áudio" na janela que o navegador abrir — sem isso
-          ele entrega a tela sem som. O som vem da aba ou da janela escolhida: para levar o
-          som de um jogo, compartilhe o jogo como janela, não a tela inteira.
-        </p>
-
-        <button id="start" class="primary">Escolher tela e transmitir</button>
+        <p class="setup-label">Configuração escolhida na Activity</p>
+        <p id="presetLine" class="preset"></p>
       </section>
 
-      <section id="live" hidden>
-        <div class="live-badge"><span class="dot"></span> No ar</div>
-        <video id="preview" muted playsinline></video>
-        <div class="stats">
-          <div><strong id="viewers">0</strong><span>assistindo</span></div>
-          <div><strong id="fpsOut">—</strong><span>quadros</span></div>
-          <div><strong id="bitrate">—</strong><span>enviando</span></div>
-          <div><strong id="elapsed">00:00</strong><span>no ar</span></div>
-        </div>
-        <button id="somAba" class="secondary" hidden>Som de uma aba ou janela</button>
-        <button id="stop" class="danger">Parar de transmitir</button>
-      </section>
+      <div class="fontes">
+        <section class="bloco" id="bloco-tela">
+          <div class="fonte-head"><h2>Tela</h2><span class="fonte-chip">PRINCIPAL</span></div>
 
-      <p id="status" class="status" role="status"></p>
+          <div id="tela-setup">
+            <p class="note" id="tela-nota"></p>
+
+            <button id="tela-start" class="primary">Escolher tela e transmitir</button>
+          </div>
+
+          <div id="tela-live" hidden>
+            <div class="live-badge"><span class="dot"></span> No ar</div>
+            <video id="tela-preview" muted playsinline></video>
+            <div class="stats">
+              <div><strong id="tela-viewers">0</strong><span>assistindo</span></div>
+              <div><strong id="tela-fps">—</strong><span>quadros</span></div>
+              <div><strong id="tela-bitrate">—</strong><span>enviando</span></div>
+              <div><strong id="tela-elapsed">00:00</strong><span>no ar</span></div>
+            </div>
+            <button id="somAba" class="secondary" hidden>Som de uma aba ou janela</button>
+            <button id="tela-stop" class="danger">Parar de transmitir a tela</button>
+          </div>
+
+          <p id="tela-status" class="status" role="status"></p>
+        </section>
+
+        <section class="bloco" id="bloco-camera">
+          <div class="fonte-head"><h2>Câmera</h2><span class="fonte-chip">OPCIONAL</span></div>
+
+          <div id="camera-setup">
+            <p class="note">
+              A câmera vai sem som — sua voz continua indo pela call do Discord.
+            </p>
+
+            <button id="camera-start" class="primary">Ligar a câmera</button>
+          </div>
+
+          <div id="camera-live" hidden>
+            <div class="live-badge"><span class="dot"></span> No ar</div>
+            <video id="camera-preview" muted playsinline></video>
+            <div class="stats">
+              <div><strong id="camera-viewers">0</strong><span>assistindo</span></div>
+              <div><strong id="camera-fps">—</strong><span>quadros</span></div>
+              <div><strong id="camera-bitrate">—</strong><span>enviando</span></div>
+              <div><strong id="camera-elapsed">00:00</strong><span>no ar</span></div>
+            </div>
+            <button id="camera-stop" class="danger">Desligar a câmera</button>
+          </div>
+
+          <p id="camera-status" class="status" role="status"></p>
+        </section>
+      </div>
 
       <footer>
         <p>Mantenha esta aba aberta enquanto transmite. Você pode voltar para o Discord — a transmissão continua.</p>
       </footer>
     </main>
 
-    <script type="module" src="/share.js?v=12"></script>
+    <script type="module" src="/share.js?v=16"></script>
   </body>
 </html>

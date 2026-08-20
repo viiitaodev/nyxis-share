@@ -26,6 +26,12 @@ body {
   margin: 0;
 }
 
+#app:fullscreen {
+  width: 100%;
+  height: 100%;
+  background: var(--bg);
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -111,7 +117,9 @@ body {
    visível — sair por tecla é atalho, não é caminho. */
 .grid.palco.cheia {
   grid-template-columns: minmax(0, 1fr);
-  padding: 0;
+  /* Reserva uma faixa mínima para os controles flutuantes no canto, sem
+     colocá-los sobre o vídeo. */
+  padding: 0 16px 72px;
 }
 
 .grid.palco.cheia .tile {
@@ -216,6 +224,110 @@ body {
 .sidebar-people .avatar {
   width: 42%;
   font-size: 13px;
+}
+
+/* A barra não é reanexada à lateral a cada render: isso interrompia os
+   handlers de assistir e podia deixar os botões fora da tela. Ela continua
+   filha da Activity e só é posicionada visualmente na coluna direita. */
+#app.controles-na-lateral > .bottombar {
+  display: flex;
+  position: absolute;
+  z-index: 2;
+  right: 12px;
+  bottom: 12px;
+  width: var(--strip, 300px);
+  padding: 10px 0 0;
+  align-items: stretch;
+  border-top: 1px solid var(--line);
+}
+
+#app.controles-na-lateral .grid.palco .sidebar {
+  padding-bottom: 190px;
+}
+
+#app.controles-na-lateral > .bottombar .dock {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+#app.controles-na-lateral > .bottombar .group {
+  display: contents;
+}
+
+#app.controles-na-lateral > .bottombar .btn {
+  min-width: 0;
+  height: 38px;
+  padding: 0 8px;
+  justify-content: center;
+}
+
+#app.controles-na-lateral > .bottombar .btn.wide {
+  grid-column: auto;
+}
+
+#app.controles-na-lateral #shareLabel,
+#app.controles-na-lateral #cameraLabel {
+  display: none;
+}
+
+#app.controles-na-lateral > .bottombar .panel {
+  width: 100%;
+}
+
+/* Aba que permanece quando o dock se recolhe. A preferência é guardada no
+   cliente para a tela não voltar a abrir a cada nova transmissão. */
+#app.controles-na-lateral > .bottombar .controls-collapse {
+  display: inline-flex;
+  align-self: flex-end;
+}
+
+#app.controles-recolhidos > .bottombar {
+  width: 38px;
+  padding: 0;
+  border-top: 0;
+}
+
+#app.controles-recolhidos > .bottombar .dock,
+#app.controles-recolhidos > .bottombar .panel {
+  display: none;
+}
+
+#app.controles-recolhidos > .bottombar .controls-collapse svg {
+  transform: rotate(180deg);
+}
+
+/* Em tela cheia não há coluna lateral. Os mesmos controles viram uma fileira
+   compacta no canto direito, e a reserva no grid impede que cubram o vídeo. */
+#app.controles-no-canto > .bottombar {
+  width: auto;
+  padding: 0;
+  border-top: 0;
+  align-items: flex-end;
+}
+
+#app.controles-no-canto > .bottombar .dock,
+#app.controles-no-canto > .bottombar .group {
+  display: flex;
+  gap: 5px;
+  padding: 0;
+  background: transparent;
+}
+
+#app.controles-no-canto > .bottombar .btn {
+  width: 38px;
+  min-width: 38px;
+}
+
+#app.controles-no-canto > .bottombar .panel {
+  position: absolute;
+  right: 0;
+  bottom: 46px;
+  width: 240px;
+}
+
+#app.controles-no-canto > .bottombar .controls-collapse {
+  align-self: auto;
 }
 
 .divider {
@@ -461,6 +573,30 @@ body {
   align-items: center;
   gap: 6px;
   max-width: calc(100% - 16px);
+}
+
+/* Rótulo da fonte. Só a câmera leva um: tela é o caso comum, e marcar as duas
+   viraria ruído em cima de cada miniatura. Canto de cima à esquerda, que é o
+   único livre — o nome e a plateia ficam no rodapé, o parar fica à direita. */
+.tile-fonte {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.65);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  /* Não rouba o clique do tile, que alterna destaque e tela cheia. */
+  pointer-events: none;
+}
+
+.sidebar .tile-fonte {
+  top: 5px;
+  left: 5px;
+  padding: 2px 6px;
+  font-size: 10.5px;
 }
 
 .tile-watchers {
@@ -845,6 +981,16 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.panel-sub {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #111214;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .panel-btn {
   width: 100%;
   margin-top: 10px;
@@ -1177,6 +1323,30 @@ button {
   line-height: 1.5;
 }
 
+/* Seção "Opções avançadas" recolhida por padrão — não expõe complexidade. */
+.modal-advanced {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111214;
+}
+
+.modal-advanced summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.modal-advanced[open] summary {
+  margin-bottom: 8px;
+}
+
+.modal-advanced .field-check {
+  margin-top: 6px;
+}
+
 .modal-actions {
   display: flex;
   justify-content: flex-end;
@@ -1297,6 +1467,13 @@ button {
   .bottombar {
     padding: 0 8px 8px;
     gap: 6px;
+  }
+
+  #app.controles-na-lateral > .bottombar {
+    position: static;
+    width: auto;
+    padding: 0 8px 8px;
+    border-top: 0;
   }
 
   .dock {
