@@ -21,7 +21,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-import { cor } from './env.mjs';
+import { cor, lerEnv } from './env.mjs';
+import { garantirEntryPoint, contarEntryPoint } from './entry-point.mjs';
 import { abrirTunel } from './tunel.mjs';
 import { RAIZ, VITE, acompanhar, derrubar, encerrandoAgora } from './processos.mjs';
 
@@ -44,6 +45,18 @@ acompanhar(
     stdio: 'pipe',
   })
 );
+
+// -------------------------------------------------------------- entry point
+
+// A mesma checagem do `start:fast`, pelo mesmo motivo: sem o comando
+// PRIMARY_ENTRY_POINT a atividade não aparece no seletor do Discord, e nem o
+// portal nem o terminal dizem por quê. Aqui ela vem depois do build começar,
+// para a ida ao Discord acontecer enquanto o vite compila.
+//
+// Sem credenciais no `.env` é um no-op silencioso: quem roda só no navegador
+// não tem atividade nenhuma para registrar.
+const { DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET } = lerEnv();
+contarEntryPoint(await garantirEntryPoint(DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET));
 
 // -------------------------------------------------------------------- túnel
 

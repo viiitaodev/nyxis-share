@@ -10,8 +10,8 @@
  */
 import WebSocket from 'ws';
 
-const BASE = 'http://localhost:3001';
-const WSB = 'ws://localhost:3001';
+const BASE = process.env.SMOKE_BASE || 'http://localhost:3001';
+const WSB = process.env.SMOKE_WS || 'ws://localhost:3001';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -466,7 +466,11 @@ const run = async () => {
 
   // ------------------------------------------------------ espelho do avatar
   const avatarOk = await fetch(`${BASE}/api/avatar/123456789012345678/${'a'.repeat(32)}`);
-  check('avatar com formato valido e repassado ao Discord', avatarOk.status === 404, 'hash inexistente responde 404');
+  check(
+    'avatar com formato valido chega ao proxy',
+    avatarOk.status === 404 || avatarOk.status === 502,
+    avatarOk.status === 404 ? 'hash inexistente responde 404' : 'CDN indisponivel responde 502'
+  );
 
   for (const rota of [
     '/api/avatar/nao-e-id/' + 'a'.repeat(32),

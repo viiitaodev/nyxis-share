@@ -105,6 +105,29 @@ const DISCORD_CLIENT_SECRET = await perguntar('Client Secret', {
   valida: (v) => (v.length >= 20 ? null : 'O Secret é bem mais longo que isso. Confira e cole de novo.'),
 });
 
+// Opcional de propósito: sem o token tudo continua funcionando, então travar a
+// configuração aqui cobraria um passo a mais por um ganho que nem todo mundo
+// quer. Mas ele precisa ser *perguntado* — antes disto a chave só existia na
+// lista de conhecidas do env.mjs, nenhum script pedia, e as duas coisas que
+// dependem dela nunca funcionaram para ninguém.
+linha();
+nota('  Opcional: o token do bot. Ele serve para duas coisas —');
+nota('  conferir se a pessoa está mesmo na call antes de abrir a sala,');
+nota('  e mostrar nome, imagem e tamanho dos servidores no painel.');
+nota('  Fica em "Bot", no menu da esquerda, botão "Reset Token".');
+nota('  Não quer agora? Aperte Enter e siga.');
+linha();
+
+const DISCORD_BOT_TOKEN = await perguntar('Token do bot (opcional)', {
+  padrao: atual.DISCORD_BOT_TOKEN,
+  // O engano comum é colar o Client Secret aqui. Ele tem 32 caracteres, o
+  // token do bot passa de 60 — o piso separa os dois sem precisar de regex.
+  valida: (v) =>
+    !v || v.length >= 50
+      ? null
+      : 'Curto demais para um token de bot; isso parece o Client Secret. Cole o token ou aperte Enter para pular.',
+});
+
 titulo('  Passo 2 de 3 · Endereço público');
 linha();
 nota('  O Discord precisa alcançar o programa que roda no seu computador,');
@@ -144,7 +167,13 @@ const PUBLIC_ORIGIN = await perguntar('Endereço público', {
 const origem = PUBLIC_ORIGIN.replace(/\/+$/, '');
 const dominio = origem.replace(/^https:\/\//, '');
 
-gravarEnv({ SESSION_SECRET, DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, PUBLIC_ORIGIN: origem });
+gravarEnv({
+  SESSION_SECRET,
+  DISCORD_CLIENT_ID,
+  DISCORD_CLIENT_SECRET,
+  DISCORD_BOT_TOKEN,
+  PUBLIC_ORIGIN: origem,
+});
 
 // Confere aqui, com as credenciais em mão, o atalho que faz a atividade
 // aparecer no foguete. Sem isto era uma configuração manual invisível.

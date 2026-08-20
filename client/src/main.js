@@ -623,7 +623,7 @@ function openProfile() {
   $('profileId').textContent = inDiscord ? `Discord · ${session.user.id}` : 'modo local';
   $('profileInput').value = me.name;
 
-  $('profileModal').hidden = false;
+  $('profileModal').hidden = false;
   $('profileInput').focus();
   $('profileInput').select();
 }
@@ -1297,7 +1297,7 @@ function askPassword(room, error) {
   $('joinError').textContent = error ?? '';
   $('joinError').hidden = !error;
   if (!error) $('joinPass').value = '';
-  $('joinModal').hidden = false;
+  $('joinModal').hidden = false;
   $('joinPass').focus();
 }
 
@@ -1867,8 +1867,8 @@ function openModal(mode) {
   $('modalSom').hidden = !live || !myBroadcast;
   if (live && myBroadcast) {
     $('modalSom').textContent = myBroadcast.temSom()
-      ? 'Trocar a aba do som'
-      : 'Som de uma aba';
+      ? 'Trocar a fonte do som'
+      : 'Som de uma aba ou janela';
 
     const s = myBroadcast.getSettings();
     $('mQuality').value = String(s.bitrate);
@@ -1883,7 +1883,7 @@ function openModal(mode) {
     $('mAudio').checked = ajustes.som;
   }
 
-  $('modal').hidden = false;
+  $('modal').hidden = false;
 }
 
 // Com algo no ar a engrenagem ajusta aquela transmissão; parada, ela edita o
@@ -1929,12 +1929,12 @@ $('modalSwap').addEventListener('click', async () => {
 });
 
 // A saída para quem quer tela inteira COM som: o vídeo continua o mesmo e o som
-// passa a vir de uma aba, que é a única fonte isolada do Discord.
+// passa a vir de uma aba ou de uma janela, fontes isoladas do Discord.
 $('modalSom').addEventListener('click', async () => {
   if (!myBroadcast) return;
   try {
     await myBroadcast.trocarSom();
-    toast('Som ligado, vindo da aba escolhida.');
+    toast('Som ligado, vindo da fonte escolhida.');
     closeModal();
     renderBar();
   } catch (err) {
@@ -2036,7 +2036,7 @@ $('newRoom').addEventListener('click', () => {
   if (!session) return;
   $('createName').value = '';
   $('createPass').value = '';
-  $('createModal').hidden = false;
+  $('createModal').hidden = false;
   $('createName').focus();
 });
 
@@ -2103,7 +2103,7 @@ $('roomSave').addEventListener('click', async () => {
 function openRoomSettings() {
   $('roomSub').textContent = roomInfo?.name ?? '';
   $('roomPass').value = '';
-  $('roomModal').hidden = false;
+  $('roomModal').hidden = false;
   $('roomPass').focus();
 }
 

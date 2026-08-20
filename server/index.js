@@ -9,6 +9,8 @@ import { WebSocketServer } from 'ws';
 
 import { signToken, verifyToken } from './tokens.js';
 import * as R from './rooms.js';
+import { systemSnapshot, startSampling } from './system.js';
+import { buildAdminDashboard } from './admin.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
@@ -17,6 +19,7 @@ const {
   DISCORD_CLIENT_ID,
   DISCORD_CLIENT_SECRET,
   DISCORD_BOT_TOKEN,
+  DISCORD_ADMIN_ID = '',
   PUBLIC_ORIGIN: ORIGEM_CRUA = 'http://localhost:3001',
   PORT = 3001,
   NODE_ENV = 'development',
@@ -28,6 +31,8 @@ const {
 const PUBLIC_ORIGIN = ORIGEM_CRUA.replace(/[/]+$/, '');
 
 const isProd = NODE_ENV === 'production';
+const ADMIN_ID = String(DISCORD_ADMIN_ID).trim();
+const ADMIN_COOKIE = 'discord_screen_admin';
 
 // Falha no arranque, não no primeiro pedido: subir sem segredo significa
 // assinar todos os tokens com o padrão público, e um servidor assim de pé é
@@ -36,6 +41,29 @@ if (isProd && !process.env.SESSION_SECRET) {
   console.error('ERRO: SESSION_SECRET obrigatorio em producao — sem ele os tokens sao forjaveis.');
   process.exit(1);
 }
+
+if (ADMIN_ID && !process.env.SESSION_SECRET) {
+  console.error('ERRO: SESSION_SECRET obrigatorio quando o painel admin esta ligado.');
+  process.exit(1);
+}
+
+// O painel inteiro se apoia num cookie assinado com este segredo. Um segredo
+// curto é adivinhável fora daqui, sem deixar rastro no servidor: quem acertar
+// forja o cookie e entra como dono. O comando de configuração gera 64
+// caracteres; este piso só barra quem editou o .env na mão e pôs qualquer coisa.
+if (ADMIN_ID && process.env.SESSION_SECRET.length < 32) {
+  console.error('ERRO: SESSION_SECRET curto demais para o painel admin (minimo 32 caracteres).');
+  console.error('      Rode "npm run configurar" para gerar um seguro.');
+  process.exit(1);
+}
+
+if (ADMIN_ID && !/^[0-9]{15,21}$/.test(ADMIN_ID)) {
+  console.error('ERRO: DISCORD_ADMIN_ID invalido. Use o ID numerico da sua conta Discord.');
+  process.exit(1);
+}
+
+// Sem painel, ninguém lê as métricas — então nem começa a medir.
+if (ADMIN_ID) startSampling();
 
 const app = express();
 app.use(express.json());
@@ -165,14 +193,24 @@ app.post('/api/session', async (req, res) => {
 
     if (!me?.id) return res.status(401).json({ error: 'token invalido' });
 
-    const presenca = await inVoiceChannel(guild_id, channel_id, me.id);
+    const guildId = /^[0-9]{15,21}$/.test(String(guild_id ?? '')) ? String(guild_id) : null;
+    const channelId = /^[0-9]{15,21}$/.test(String(channel_id ?? '')) ? String(channel_id) : null;
+    const [presenca, guildName] = await Promise.all([
+      inVoiceChannel(guildId, channelId, me.id),
+      resolveGuildName(guildId),
+    ]);
     if (presenca === 'fora') {
       return res.status(403).json({ error: 'Entre na call antes de abrir a atividade.' });
     }
 
     // O canal entra no token assinado, não fica só na resposta: é o que permite
     // ao endpoint da sala da call confiar sem consultar o Discord de novo.
-    const verificado = presenca === 'ok' ? { call: channel_id } : {};
+    const verificado = {
+      ...(presenca === 'ok' ? { call: channelId } : {}),
+      ...(guildId ? { guild: guildId } : {}),
+      ...(guildName ? { guildName } : {}),
+      ...(channelId ? { channel: channelId } : {}),
+    };
 
     const identity = issueIdentity(
       instance_id,
@@ -183,7 +221,13 @@ app.post('/api/session', async (req, res) => {
       verificado
     );
 
-    res.json({ ...identity, call: presenca === 'ok' ? channel_id : null });
+    res.json({
+      ...identity,
+      call: presenca === 'ok' ? channelId : null,
+      guild: guildId,
+      guildName,
+      channel: channelId,
+    });
   } catch (err) {
     console.error('[session] erro:', err);
     res.status(500).json({ error: 'erro interno' });
@@ -223,6 +267,42 @@ function issueIdentity(instance, uid, name, avatar, ttl = 8 * 60 * 60, extra = {
     instance,
     identity: signToken({ instance, uid, name, av: avatar, scope: 'identity', ...extra }, ttl),
   };
+}
+
+const guildCache = new Map();
+
+/**
+ * O nome de um servidor, pelo bot.
+ *
+ * Sem ampliar escopo de OAuth: quando o bot não está no servidor, o painel
+ * continua funcional e mostra o ID no lugar do nome.
+ *
+ * Cache de uma hora. O painel se atualiza de 2 em 2 segundos, e sem cache isso
+ * viraria uma chamada por servidor a cada volta.
+ */
+async function resolveGuildName(guildId) {
+  if (!DISCORD_BOT_TOKEN || !guildId) return null;
+
+  const cached = guildCache.get(guildId);
+  if (cached && cached.expiresAt > Date.now()) return cached.name;
+
+  let name = null;
+  try {
+    const response = await fetch(`https://discord.com/api/v10/guilds/${guildId}`, {
+      headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    const guild = response.ok ? await response.json() : null;
+    if (typeof guild?.name === 'string') name = guild.name;
+  } catch {
+    name = null;
+  }
+
+  guildCache.set(guildId, {
+    name,
+    expiresAt: Date.now() + (name ? 60 * 60 * 1000 : 10 * 60 * 1000),
+  });
+  return name;
 }
 
 /**
@@ -348,7 +428,14 @@ function identityOf(req, res) {
  * aleatório, então o token morre junto com ela.
  */
 function issueRoomTokens(roomId, me) {
-  const base = { room: roomId, uid: me.uid, name: me.name, av: me.av ?? null };
+  const base = {
+    room: roomId,
+    uid: me.uid,
+    name: me.name,
+    av: me.av ?? null,
+    guild: me.guild ?? null,
+    channel: me.channel ?? me.call ?? null,
+  };
   return {
     roomId,
     viewerToken: signToken({ ...base, role: 'viewer' }),
@@ -382,6 +469,9 @@ app.post('/api/rooms/create', (req, res) => {
     ownerId: me.uid,
     ownerName: me.name,
     password: req.body?.password || null,
+    guildId: me.guild ?? null,
+    guildName: me.guildName ?? null,
+    channelId: me.channel ?? null,
   });
   if (error) return res.status(400).json({ error });
 
@@ -404,7 +494,11 @@ app.post('/api/rooms/call', (req, res) => {
   const me = identityOf(req, res);
   if (!me) return;
 
-  const room = R.ensureCallRoom(me.instance, salaDaCall(me));
+  const room = R.ensureCallRoom(me.instance, salaDaCall(me), {
+    guildId: me.guild ?? null,
+    guildName: me.guildName ?? null,
+    channelId: me.channel ?? me.call ?? null,
+  });
   res.json(issueRoomTokens(room.id, me));
 });
 
@@ -466,18 +560,39 @@ app.post('/api/rooms/password', (req, res) => {
 const WEB_INSTANCE = 'web';
 const REDIRECT_URI = `${PUBLIC_ORIGIN}/auth/callback`;
 
-app.get('/auth/login', (_req, res) => {
+function discordAuthorizeUrl(state = null) {
   const url = new URL('https://discord.com/oauth2/authorize');
   url.searchParams.set('client_id', DISCORD_CLIENT_ID);
   url.searchParams.set('redirect_uri', REDIRECT_URI);
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('scope', 'identify');
+  if (state) url.searchParams.set('state', state);
+  return url;
+}
+
+app.get('/auth/login', (_req, res) => {
+  const url = discordAuthorizeUrl();
   res.redirect(url.toString());
 });
 
+app.get('/admin/auth/login', (_req, res) => {
+  if (!ADMIN_ID) return res.redirect('/admin?error=not_configured');
+  if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET) {
+    return res.redirect('/admin?error=discord_not_configured');
+  }
+
+  const state = signToken(
+    { scope: 'oauth-state', target: 'admin', nonce: crypto.randomBytes(12).toString('base64url') },
+    10 * 60
+  );
+  res.redirect(discordAuthorizeUrl(state).toString());
+});
+
 app.get('/auth/callback', async (req, res) => {
-  const { code } = req.query;
-  if (!code) return res.redirect('/?erro=sem_codigo');
+  const { code, state } = req.query;
+  const oauthState = verifyToken(typeof state === 'string' ? state : '');
+  const adminFlow = oauthState?.scope === 'oauth-state' && oauthState.target === 'admin';
+  if (!code) return res.redirect(adminFlow ? '/admin?error=sem_codigo' : '/?erro=sem_codigo');
 
   try {
     const token = await fetch('https://discord.com/api/oauth2/token', {
@@ -492,13 +607,37 @@ app.get('/auth/callback', async (req, res) => {
       }),
     }).then((r) => r.json());
 
-    if (!token.access_token) return res.redirect('/?erro=troca_falhou');
+    if (!token.access_token) {
+      return res.redirect(adminFlow ? '/admin?error=troca_falhou' : '/?erro=troca_falhou');
+    }
 
     const me = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${token.access_token}` },
     }).then((r) => r.json());
 
-    if (!me?.id) return res.redirect('/?erro=perfil_falhou');
+    if (!me?.id) {
+      return res.redirect(adminFlow ? '/admin?error=perfil_falhou' : '/?erro=perfil_falhou');
+    }
+
+    if (adminFlow) {
+      if (me.id !== ADMIN_ID) return res.redirect('/admin?error=forbidden');
+
+      const adminSession = signToken(
+        {
+          scope: 'admin',
+          uid: me.id,
+          name: me.global_name || me.username,
+          av: me.avatar ?? null,
+        },
+        8 * 60 * 60
+      );
+      const secure = PUBLIC_ORIGIN.startsWith('https://') ? '; Secure' : '';
+      res.setHeader(
+        'Set-Cookie',
+        `${ADMIN_COOKIE}=${adminSession}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${8 * 60 * 60}${secure}`
+      );
+      return res.redirect('/admin');
+    }
 
     const identity = issueIdentity(
       WEB_INSTANCE,
@@ -512,11 +651,80 @@ app.get('/auth/callback', async (req, res) => {
     res.redirect(`/#identity=${encodeURIComponent(identity.identity)}`);
   } catch (err) {
     console.error('[auth] erro:', err);
-    res.redirect('/?erro=interno');
+    res.redirect(adminFlow ? '/admin?error=interno' : '/?erro=interno');
   }
 });
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, rooms: R.stats() }));
+app.get('/api/health', (_req, res) => res.json({ ok: true }));
+
+function cookieOf(req, name) {
+  for (const item of String(req.headers.cookie ?? '').split(';')) {
+    const separator = item.indexOf('=');
+    if (separator < 0 || item.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(item.slice(separator + 1).trim());
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function adminOf(req) {
+  const session = verifyToken(cookieOf(req, ADMIN_COOKIE));
+  if (!session || session.scope !== 'admin' || !ADMIN_ID || session.uid !== ADMIN_ID) return null;
+  return session;
+}
+
+function requireAdmin(req, res, next) {
+  const admin = adminOf(req);
+  if (!admin) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.status(401).json({ error: 'admin_required', configured: Boolean(ADMIN_ID) });
+  }
+  req.admin = admin;
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+}
+
+app.get('/api/admin/me', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  if (!ADMIN_ID) return res.status(503).json({ configured: false, error: 'not_configured' });
+  const admin = adminOf(req);
+  if (!admin) return res.status(401).json({ configured: true, error: 'admin_required' });
+  res.json({
+    configured: true,
+    user: { id: admin.uid, name: admin.name, avatar: admin.av ?? null },
+  });
+});
+
+app.post('/api/admin/logout', (_req, res) => {
+  const secure = PUBLIC_ORIGIN.startsWith('https://') ? '; Secure' : '';
+  res.setHeader(
+    'Set-Cookie',
+    `${ADMIN_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`
+  );
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/metrics', requireAdmin, (_req, res) => {
+  const dashboard = buildAdminDashboard({
+    roomState: R.adminStats(),
+    sockets: wss.clients,
+    system: systemSnapshot(),
+    configuration: {
+      environment: NODE_ENV,
+      port: Number(PORT),
+      publicOrigin: PUBLIC_ORIGIN,
+      clientId: DISCORD_CLIENT_ID || null,
+      botConfigured: Boolean(DISCORD_BOT_TOKEN),
+      adminId: ADMIN_ID,
+      sessionSecretConfigured: Boolean(process.env.SESSION_SECRET),
+    },
+  });
+  res.json(dashboard);
+});
 
 /**
  * O que o cliente precisa saber e só o servidor sabe, em tempo de execução.
@@ -613,6 +821,9 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 wss.on('connection', (ws, _req, auth, fonte, controle) => {
+  ws.__connectedAt = Date.now();
+  ws.__rttMs = null;
+  ws.__pingSentAt = null;
   const room = R.getRoom(auth.room);
 
   // A sala pode ter fechado entre a emissão do token e a conexão.
@@ -787,14 +998,21 @@ const heartbeat = setInterval(() => {
       continue;
     }
     ws.__alive = false;
+    ws.__pingSentAt = Date.now();
     ws.ping();
   }
-}, 30_000);
+}, 15_000);
 
 wss.on('connection', (ws) => {
   ws.__alive = true;
   ws.on('pong', () => {
     ws.__alive = true;
+    if (ws.__pingSentAt) {
+      const measured = Date.now() - ws.__pingSentAt;
+      // Suaviza os saltos sem esconder uma conexao que ficou lenta.
+      ws.__rttMs = Number.isFinite(ws.__rttMs) ? ws.__rttMs * 0.7 + measured * 0.3 : measured;
+      ws.__pingSentAt = null;
+    }
   });
 });
 
@@ -867,6 +1085,13 @@ server.listen(PORT, () => {
   } else {
     console.log('  Discord: desligado (só navegador).');
     console.log('  Para usar dentro do Discord, rode: npm run configurar');
+  }
+
+  if (ADMIN_ID) {
+    console.log(`  Painel administrativo: ${local}/admin`);
+    if (PUBLIC_ORIGIN !== local) console.log(`  Painel publico: ${PUBLIC_ORIGIN}/admin`);
+  } else {
+    console.log('  Painel administrativo: desligado (defina DISCORD_ADMIN_ID no .env).');
   }
 
   // Erro fácil de cometer e difícil de diagnosticar: com PUBLIC_ORIGIN

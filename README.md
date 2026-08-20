@@ -93,6 +93,34 @@ muda, e você não mexe no site do Discord de novo.
 
 ---
 
+## Painel administrativo
+
+O painel mostra em tempo real pessoas e servidores conectados, salas,
+transmissões, banda usada pelo relay, ping, descartes, CPU, memória, disco e
+informações do processo/container.
+
+Ative o modo de desenvolvedor no Discord, clique com o botão direito na sua
+conta e use **Copiar ID do usuário**. Depois acrescente ao `.env`:
+
+```env
+DISCORD_ADMIN_ID=123456789012345678
+```
+
+Reinicie o servidor e abra `https://seu-dominio.com/admin`. O painel pede login
+pelo Discord e o backend compara a conta confirmada pelo próprio Discord com o
+ID acima. Os endpoints não aceitam um ID enviado pelo navegador e não expõem
+Client Secret, Bot Token ou Session Secret.
+
+No Linux, o painel também lê `/proc`, cgroups e o sistema de arquivos para
+mostrar tráfego de rede do host/container e limites do container. No Windows,
+CPU, memória, disco e todas as métricas da aplicação funcionam; apenas os
+contadores globais de rede da máquina ficam indisponíveis.
+
+O nome de um servidor é resolvido com o Bot Token. Quando o bot não estiver
+naquele servidor, o painel mostra o Guild ID sem impedir as outras métricas.
+
+---
+
 ## Compartilhando com som
 
 Ao clicar em **Compartilhar tela**, marque *Compartilhar o som*.

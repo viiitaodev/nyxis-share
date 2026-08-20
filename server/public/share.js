@@ -349,14 +349,14 @@ if (!payload) {
   if (FONTES.includes(pedida)) atenderPedido(pedida);
 }
 
-// Mantém o vídeo como está e troca só de onde vem o som — a única fonte que
-// não carrega o Discord junto é uma aba.
+// Mantém o vídeo como está e troca só de onde vem o som — uma aba ou janela
+// isolada não carrega o Discord junto.
 $('somAba').addEventListener('click', async () => {
   if (!paineis.tela?.ativo()) return;
   try {
     await paineis.tela.trocarSom();
-    paineis.tela.setStatus('Som ligado, vindo da aba escolhida.', 'ok');
-    $('somAba').textContent = 'Trocar a aba do som';
+    paineis.tela.setStatus('Som ligado, vindo da fonte escolhida.', 'ok');
+    $('somAba').textContent = 'Trocar a fonte do som';
   } catch (err) {
     // Cancelar a segunda janela é escolha, não falha.
     if (err.name !== 'NotAllowedError') paineis.tela.setStatus(err.message, 'error');

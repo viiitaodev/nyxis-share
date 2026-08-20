@@ -212,13 +212,7 @@ export function createBroadcaster({
   }
 
   function capturarTela() {
-    return navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: fps, max: fps } },
-      // systemAudio: 'include' pede o som do computador em vez de só o da aba.
-      // Os tratamentos de voz ficam desligados: eles existem para microfone e,
-      // em som de aplicativo, cortam justamente o que se queria ouvir.
-      audio: audio ? audioConstraints() : false,
-    });
+    return navigator.mediaDevices.getDisplayMedia(opcoesCaptura());
   }
 
   /**
@@ -272,7 +266,6 @@ export function createBroadcaster({
    */
   function audioConstraints() {
     const c = {
-      systemAudio: 'include',
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: false,
@@ -283,7 +276,27 @@ export function createBroadcaster({
     return c;
   }
 
-/**
+  /**
+   * Impede que a captura de tela inteira misture o áudio do Discord, mas aceita
+   * áudio isolado de uma aba ou da janela do aplicativo (por exemplo, um jogo).
+   */
+  function opcoesCaptura({ video = { frameRate: { ideal: fps, max: fps } }, comSom = audio } = {}) {
+    const opts = { video, audio: comSom ? audioConstraints() : false };
+    if (comSom) {
+      opts.windowAudio = 'window';
+      opts.systemAudio = 'exclude';
+    }
+    return opts;
+  }
+
+  // `windowAudio` não aparece em getSupportedConstraints. `restrictOwnAudio`
+  // é mais recente e só liberamos som de janela onde ele indica uma pilha de
+  // captura atual — em dúvida, preservamos o comportamento seguro de só aba.
+  function somDeJanelaConfiavel() {
+    return Boolean(navigator.mediaDevices.getSupportedConstraints?.().restrictOwnAudio);
+  }
+
+  /**
    * Devolve a faixa de som, ou null quando ela traria a call de volta em eco.
    *
    * O nó: o som do sistema é capturado como uma mistura única, e nenhum
@@ -299,19 +312,38 @@ export function createBroadcaster({
    * dá para manter o vídeo da tela inteira e pegar o som de uma aba.
    */
   function prepararSom(videoTrack, capturado) {
+    if (!audio) return null;
     const faixa = capturado.getAudioTracks()[0];
-    if (!faixa) return null;
+    const superficie = videoTrack.getSettings?.().displaySurface;
 
-    if (videoTrack.getSettings?.().displaySurface === 'browser') return faixa;
+    if (faixa && somIsolado(superficie)) {
+      somBloqueado = false;
+      return faixa;
+    }
 
-    faixa.stop();
-    capturado.removeTrack(faixa);
+    if (faixa) {
+      faixa.stop();
+      capturado.removeTrack(faixa);
+    }
     somBloqueado = true;
-    onAviso?.(
-      'A tela inteira carrega o som do Discord junto, e a call se ouviria em eco. ' +
-        'Transmitindo sem som — use "Som de uma aba" para escolher de onde vem o áudio.'
-    );
+    onAviso?.(avisoSemSom(superficie, Boolean(faixa)));
     return null;
+  }
+
+  function somIsolado(superficie) {
+    return superficie === 'browser' || (superficie === 'window' && somDeJanelaConfiavel());
+  }
+
+  function avisoSemSom(superficie, tinhaFaixa) {
+    const saida = ' Use “Som de uma aba ou janela” para escolher a fonte.';
+    if (superficie === 'window' && !somDeJanelaConfiavel()) {
+      return 'Este navegador não isola o som por janela; transmitiríamos o Discord em eco.' + saida;
+    }
+    if (superficie === 'monitor') {
+      return 'A tela inteira carrega o som do Discord junto. Transmitindo sem som.' + saida;
+    }
+    if (tinhaFaixa) return 'Não deu para confirmar que esse som é isolado; ele foi removido.' + saida;
+    return 'A captura veio sem som — marque “Compartilhar o áudio” no seletor.' + saida;
   }
 
   /**
@@ -324,10 +356,9 @@ export function createBroadcaster({
    */
   async function trocarSom() {
     // Precisa vir do gesto do usuário, como qualquer getDisplayMedia.
-    const escolha = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: audioConstraints(),
-    });
+    const escolha = await navigator.mediaDevices.getDisplayMedia(
+      opcoesCaptura({ video: true, comSom: true })
+    );
 
     const faixa = escolha.getAudioTracks()[0];
     const superficie = escolha.getVideoTracks()[0]?.getSettings?.().displaySurface;
@@ -338,14 +369,18 @@ export function createBroadcaster({
     if (!faixa) {
       escolha.getTracks().forEach((t) => t.stop());
       throw new Error(
-        'Essa escolha veio sem som. Escolha uma aba e marque "Compartilhar o áudio da guia".'
+        somDeJanelaConfiavel()
+          ? 'Essa escolha veio sem som. Escolha uma aba ou janela e marque “Compartilhar o áudio”.'
+          : 'Essa escolha veio sem som. Escolha uma aba e marque “Compartilhar o áudio da guia”.'
       );
     }
 
-    if (superficie !== 'browser') {
+    if (!somIsolado(superficie)) {
       faixa.stop();
       throw new Error(
-        'Só aba tem som isolado. Tela inteira traria o Discord junto e a call se ouviria.'
+        superficie === 'window'
+          ? 'Este navegador não isola o som por janela. Escolha uma aba.'
+          : 'Tela inteira traria o Discord junto. Escolha uma aba ou a janela do aplicativo.'
       );
     }
 
@@ -361,7 +396,7 @@ export function createBroadcaster({
     audioEncoder = null;
 
     somBloqueado = false;
-    faixa.addEventListener('ended', () => onAviso?.('A aba do som foi fechada.'));
+    faixa.addEventListener('ended', () => onAviso?.('A fonte do som foi fechada.'));
     pumpAudio(faixa);
     return faixa;
   }
@@ -720,10 +755,7 @@ export function createBroadcaster({
    */
   async function changeScreen() {
     // Precisa vir do gesto do usuário, como qualquer getDisplayMedia.
-    const fresh = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: fps, max: fps } },
-      audio: audio ? audioConstraints() : false,
-    });
+    const fresh = await navigator.mediaDevices.getDisplayMedia(opcoesCaptura());
 
     const previous = stream;
     const previousReader = reader;
